@@ -1,5 +1,8 @@
 
 /target
 **/*.rs.bk
-.kernel/
+/.kernel/
 /rls
+/env.sh
+/image_out.png
+/resources/
