@@ -1,0 +1,12 @@
+[package]
+name = "path-tracer"
+version = "0.1.0"
+authors = ["Brook Heisler <redattack34@gmail.com>"]
+
+[dependencies]
+accel = { version = "0.1.0", path = "../accel"}
+accel-derive = { version = "0.1.0", path = "../accel/accel-derive"}
+kernel = { path = "kernel" }
+common = { path = "common" }
+image = "0.19.0"
+obj = "0.8.2"
