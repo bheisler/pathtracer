@@ -20,7 +20,8 @@ use image::ImageBuffer;
 #[crate_path("kernel" = "../kernel")]
 #[crate_path("common" = "../common")]
 #[build_path(".kernel")]
-pub unsafe fn trace(width: u32, height: u32, image: *mut common::Color, 
+pub unsafe fn trace(width: u32, height: u32, fov_adjustment: f32, 
+    image: *mut common::Color, 
     polygons: *const common::Polygon, polygon_count: usize,
     materials: *const common::Material, material_count: usize) {
     use accel_core::*;
@@ -28,22 +29,25 @@ pub unsafe fn trace(width: u32, height: u32, image: *mut common::Color,
     let x = (nvptx_block_idx_x() * nvptx_block_dim_x() + nvptx_thread_idx_x()) as u32;
     let y = (nvptx_block_idx_y() * nvptx_block_dim_y() + nvptx_thread_idx_y()) as u32;
 
-    kernel::trace_inner(x, y, width, height, image, 
+    kernel::trace_inner(x, y, width, height, fov_adjustment,
+        image, 
         polygons, polygon_count,
         materials, material_count);
 }
 
-fn convert_objects_to_polygons(obj: &Obj<obj::SimplePolygon>, material_idx: usize) -> Vec<Polygon> {
+fn convert_objects_to_polygons(obj: &Obj<obj::SimplePolygon>, material_idx: usize, position: Vector3) -> Vec<Polygon> {
 
     let mut polygons = vec![];
 
-    fn make_vector(floats: &[f32; 3]) -> Vector3 {
-        Vector3 {
-            x: floats[0],
-            y: floats[1],
-            z: floats[2]
-        }
-    }
+    let make_vector = |floats: &[f32; 3]| {
+        let v = Vector3 {
+            x: (floats[0] / 50.0) + position.x,
+            y: (floats[1] / 50.0) + position.y,
+            z: (floats[2] / 50.0) + position.z,
+        };
+
+        v
+    };
 
     let make_polygon = |index1, index2, index3| {
         let obj::IndexTuple(index1, _, _) = index1;
@@ -114,13 +118,24 @@ mod color_ext {
 fn main() {
     use color_ext::ColorExt;
 
-    let dragon_path = Path::new("resources/dragon.obj");
-    let dragon : Obj<obj::SimplePolygon> = Obj::load(dragon_path).expect("Failed to load dragon mesh");
-    let polygons = convert_objects_to_polygons(&dragon, 0);
+    let load_start = Instant::now();
+    let mesh_path = Path::new("resources/utah-teapot.obj");
+    let mesh : Obj<obj::SimplePolygon> = Obj::load(mesh_path).expect("Failed to load mesh");
+    // TODO: Should I do the full matrix math to allow arbitrary position/rotation/scaling of the meshes?
+    let mesh_position = Vector3 {
+        x: 4.0,
+        y: 0.0,
+        z: -10.0,
+    };
+    let polygons = convert_objects_to_polygons(&mesh, 0, mesh_position);
+    let load_time = load_start.elapsed();
+    println!("Load/Convert Time: {:?}", load_time);
     
-    // TODO: Allow arbitrary image sizes.
-    let width = 1024u32;
-    let height = 736u32;
+    // TODO: Allow arbitrary image sizes, not just multiples of 32.
+    let width = 1024u32 / 2;
+    let height = 736u32 / 2;
+    let fov = 90.0f32;
+    let fov_adjustment = (fov.to_radians() / 2.0).tan();
     let mut image_device : UVec<Color> = UVec::new((width * height) as usize).unwrap();
     let material_count = 1;
     let mut materials_device : UVec<Material> = UVec::new(material_count).unwrap();
@@ -129,6 +144,7 @@ fn main() {
         albedo: 0.18,
     };
     let polygon_count = polygons.len();
+    println!("{} polygons in scene", polygon_count);
     let mut polygons_device : UVec<Polygon> = UVec::new(polygon_count).unwrap();
     for (i, poly) in polygons.into_iter().enumerate() {
         polygons_device[i] = poly;
@@ -138,7 +154,7 @@ fn main() {
     let block = Block::xy(32, 32);
 
     let trace_start = Instant::now();
-    trace(grid, block, width, height, image_device.as_mut_ptr(),
+    trace(grid, block, width, height, fov_adjustment, image_device.as_mut_ptr(),
         polygons_device.as_ptr(), polygon_count,
         materials_device.as_ptr(), material_count);
     device::sync().unwrap();

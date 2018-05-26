@@ -10,3 +10,4 @@ pub use color::Color;
 pub use vector::Vector3;
 pub use material::Material;
 pub use polygon::Polygon;
+pub use vector::Ray;
