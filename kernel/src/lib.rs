@@ -67,11 +67,11 @@ fn intersection_test(polygon: &Polygon, ray: &Ray) -> Option<f32> {
         return None;
     }
 
-    // Compute D
-    let d = n.dot(polygon.vertices[0]);
+    // Compute -D
+    let neg_d = n.dot(polygon.vertices[0]);
 
     // Compute T
-    let t = (n.dot(ray.origin) + d) / n_dot_r;
+    let t = (neg_d - ray.origin.dot(n)) / n_dot_r;
     if t < 0.0 {
         // Triangle is behind the origin of the ray. No intersection.
         return None;
@@ -139,12 +139,34 @@ mod tests {
 
     #[test]
     #[cfg_attr(rustfmt, rustfmt_skip)]
+    fn test_polygon_intersection_offset() {
+        let polygon = Polygon {
+            vertices: [
+                Vector3 { x: -1.0, y: 1.0, z: -2.0 },
+                Vector3 { x: -1.0, y: -1.0, z: -2.0 },
+                Vector3 { x: 1.0, y: -1.0, z: -2.0 },
+            ],
+            normal: Vector3 { x: 0.0, y: 0.0, z: 1.0 },
+            material_idx: 0,
+        };
+
+        let ray = Ray {
+            origin: Vector3 { x: -0.5, y: 0.0, z: -1.0 },
+            direction: Vector3 { x: 0.0, y: 0.0, z: -1.0 },
+        };
+
+        let intersection = intersection_test(&polygon, &ray).unwrap();
+        assert_eq!(intersection, 1.0);
+    }
+
+    #[test]
+    #[cfg_attr(rustfmt, rustfmt_skip)]
     fn test_polygon_intersection_reverse() {
         let polygon = Polygon {
             vertices: [
                 Vector3 { x: -1.0, y: 1.0, z: -1.0 },
-                Vector3 { x: -1.0, y: -1.0, z: -1.0 },
                 Vector3 { x: 1.0, y: -1.0, z: -1.0 },
+                Vector3 { x: -1.0, y: -1.0, z: -1.0 },
             ],
             normal: Vector3 { x: 0.0, y: 0.0, z: -1.0 },
             material_idx: 0,
