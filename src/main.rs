@@ -1,4 +1,5 @@
 #![feature(proc_macro)]
+#![allow(dead_code)]
 
 extern crate accel;
 extern crate accel_derive;
@@ -15,12 +16,18 @@ use obj::Obj;
 use std::path::Path;
 use std::time::Instant;
 
+mod matrix;
+
+use matrix::Matrix44;
+
 #[kernel]
 #[crate("accel-core" = "0.2.0-alpha")]
 #[crate_path("kernel" = "../kernel")]
 #[crate_path("common" = "../common")]
 #[build_path(".kernel")]
 pub unsafe fn trace(
+    base_x: u32,
+    base_y: u32,
     width: u32,
     height: u32,
     fov_adjustment: f32,
@@ -32,8 +39,8 @@ pub unsafe fn trace(
 ) {
     use accel_core::*;
 
-    let x = (nvptx_block_idx_x() * nvptx_block_dim_x() + nvptx_thread_idx_x()) as u32;
-    let y = (nvptx_block_idx_y() * nvptx_block_dim_y() + nvptx_thread_idx_y()) as u32;
+    let x = base_x + (nvptx_block_idx_x() * nvptx_block_dim_x() + nvptx_thread_idx_x()) as u32;
+    let y = base_y + (nvptx_block_idx_y() * nvptx_block_dim_y() + nvptx_thread_idx_y()) as u32;
 
     kernel::trace_inner(
         x,
@@ -52,18 +59,19 @@ pub unsafe fn trace(
 fn convert_objects_to_polygons(
     obj: &Obj<obj::SimplePolygon>,
     material_idx: usize,
-    position: Vector3,
+    object_to_world: Matrix44,
 ) -> Vec<Polygon> {
     let mut polygons = vec![];
 
     let make_vector = |floats: &[f32; 3]| {
         let v = Vector3 {
-            x: (floats[0] / 50.0) + position.x,
-            y: (floats[1] / 50.0) + position.y,
-            z: (floats[2] / 50.0) + position.z,
+            x: floats[0],
+            y: floats[1],
+            z: floats[2],
         };
 
-        v
+        let t = object_to_world.clone() * v;
+        t
     };
 
     let make_polygon = |index1, index2, index3| {
@@ -137,19 +145,17 @@ fn main() {
     let load_start = Instant::now();
     let mesh_path = Path::new("resources/utah-teapot.obj");
     let mesh: Obj<obj::SimplePolygon> = Obj::load(mesh_path).expect("Failed to load mesh");
-    // TODO: Should I do the full matrix math to allow arbitrary position/rotation/scaling of the meshes?
-    let mesh_position = Vector3 {
-        x: 4.0,
-        y: 0.0,
-        z: -3.0,
-    };
-    let polygons = convert_objects_to_polygons(&mesh, 0, mesh_position);
+
+    let object_to_world_matrix = Matrix44::translate(0.0, 0.0, -5.0) * Matrix44::scale_linear(1.0)
+        * Matrix44::translate(0.0, -(3.15 / 2.0), 0.0);
+    let polygons = convert_objects_to_polygons(&mesh, 0, object_to_world_matrix);
+
     let load_time = load_start.elapsed();
     println!("Load/Convert Time: {:?}", load_time);
 
     // TODO: Allow arbitrary image sizes, not just multiples of 32.
-    let width = 1024u32 / 2;
-    let height = 736u32 / 2;
+    let width = 1024u32 * 2;
+    let height = 736u32 * 2;
     let fov = 90.0f32;
     let fov_adjustment = (fov.to_radians() / 2.0).tan();
     let mut image_device: UVec<Color> = UVec::new((width * height) as usize).unwrap();
@@ -170,23 +176,40 @@ fn main() {
         polygons_device[i] = poly;
     }
 
-    let grid = Grid::xy(width / 32, height / 32);
-    let block = Block::xy(32, 32);
+    let chunk_size_x = 256;
+    let chunk_size_y = 128;
+
+    let grid = Grid::xy(8, 4);
+    let block = Block::xy(chunk_size_x / grid.x, chunk_size_y / grid.y);
 
     let trace_start = Instant::now();
-    trace(
-        grid,
-        block,
-        width,
-        height,
-        fov_adjustment,
-        image_device.as_mut_ptr(),
-        polygons_device.as_ptr(),
-        polygon_count,
-        materials_device.as_ptr(),
-        material_count,
-    );
-    device::sync().unwrap();
+
+    for chunk_y in 0..(height / chunk_size_y) {
+        let base_y = chunk_y * chunk_size_y;
+        for chunk_x in 0..(width / chunk_size_x) {
+            let base_x = chunk_x * chunk_size_x;
+            trace(
+                grid,
+                block,
+                base_x,
+                base_y,
+                width,
+                height,
+                fov_adjustment,
+                image_device.as_mut_ptr(),
+                polygons_device.as_ptr(),
+                polygon_count,
+                materials_device.as_ptr(),
+                material_count,
+            );
+            let err = device::sync();
+            match err {
+                Err(e) => println!("{:?}", e),
+                Ok(_) => {}
+            }
+        }
+    }
+
     let trace_time = trace_start.elapsed();
     println!("Trace time: {:?}", trace_time);
 
