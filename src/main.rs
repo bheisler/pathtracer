@@ -139,29 +139,67 @@ mod color_ext {
     }
 }
 
+fn bounding_box(polygons: &[Polygon]) {
+    let mut min_x = 100000.0;
+    let mut max_x = -100000.0;
+    let mut min_y = 100000.0;
+    let mut max_y = -100000.0;
+    let mut min_z = 100000.0;
+    let mut max_z = -100000.0;
+    for p in polygons {
+        for v in &p.vertices {
+            min_x = v.x.min(min_x);
+            max_x = v.x.max(max_x);
+            min_y = v.y.min(min_y);
+            max_y = v.y.max(max_y);
+            min_z = v.z.min(min_z);
+            max_z = v.z.max(max_z);
+        }
+    }
+
+    println!("Bounding box:");
+    println!("X: {} - {}", min_x, max_x);
+    println!("y: {} - {}", min_y, max_y);
+    println!("z: {} - {}", min_z, max_z);
+}
+
 fn main() {
     use color_ext::ColorExt;
 
     let load_start = Instant::now();
+
     let mesh_path = Path::new("resources/utah-teapot.obj");
     let mesh: Obj<obj::SimplePolygon> = Obj::load(mesh_path).expect("Failed to load mesh");
 
-    let object_to_world_matrix = Matrix44::translate(0.0, 0.0, -5.0) * Matrix44::scale_linear(1.0)
+    let object_to_world_matrix = Matrix44::translate(0.0, (-3.0 - -1.575), -5.0)
+        * Matrix44::scale_linear(1.0)
         * Matrix44::translate(0.0, -(3.15 / 2.0), 0.0);
-    let polygons = convert_objects_to_polygons(&mesh, 0, object_to_world_matrix);
+    let teapot_1_polygons = convert_objects_to_polygons(&mesh, 0, object_to_world_matrix);
+    bounding_box(&teapot_1_polygons);
+
+    let object_to_world_matrix = Matrix44::translate(0.0, 7.0, -5.0) * Matrix44::scale_linear(1.0)
+        * Matrix44::translate(0.0, -(3.15 / 2.0), 0.0);
+    let teapot_2_polygons = convert_objects_to_polygons(&mesh, 2, object_to_world_matrix);
+    bounding_box(&teapot_2_polygons);
+
+    let box_path = Path::new("resources/box.obj");
+    let box_mesh: Obj<obj::SimplePolygon> = Obj::load(box_path).expect("Failed to load mesh");
+    let box_polygons = convert_objects_to_polygons(&box_mesh, 1, Matrix44::identity());
+    bounding_box(&box_polygons);
 
     let load_time = load_start.elapsed();
     println!("Load/Convert Time: {:?}", load_time);
 
     // TODO: Allow arbitrary image sizes, not just multiples of 32.
-    let width = 1024u32 * 2;
-    let height = 736u32 * 2;
+    let width = 1024u32;
+    let height = 736u32;
     let fov = 90.0f32;
     let fov_adjustment = (fov.to_radians() / 2.0).tan();
     let mut image_device: UVec<Color> = UVec::new((width * height) as usize).unwrap();
-    let material_count = 1;
+    let material_count = 3;
     let mut materials_device: UVec<Material> = UVec::new(material_count).unwrap();
     materials_device[0] = Material {
+        // Teapot 1
         color: Color {
             red: 0.0,
             green: 1.0,
@@ -169,24 +207,47 @@ fn main() {
         },
         albedo: 0.18,
     };
-    let polygon_count = polygons.len();
+    materials_device[1] = Material {
+        // Box
+        color: Color {
+            red: 0.25,
+            green: 0.25,
+            blue: 0.25,
+        },
+        albedo: 0.18,
+    };
+    materials_device[2] = Material {
+        // Teapot 2
+        color: Color {
+            red: 0.0,
+            green: 0.0,
+            blue: 1.0,
+        },
+        albedo: 0.18,
+    };
+    let polygon_count = teapot_1_polygons.len() + teapot_2_polygons.len() + box_polygons.len();
     println!("{} polygons in scene", polygon_count);
     let mut polygons_device: UVec<Polygon> = UVec::new(polygon_count).unwrap();
-    for (i, poly) in polygons.into_iter().enumerate() {
+    for (i, poly) in teapot_1_polygons
+        .into_iter()
+        .chain(teapot_2_polygons.into_iter())
+        .chain(box_polygons.into_iter())
+        .enumerate()
+    {
         polygons_device[i] = poly;
     }
 
-    let chunk_size_x = 256;
+    let chunk_size_x = 128;
     let chunk_size_y = 128;
 
-    let grid = Grid::xy(8, 4);
+    let grid = Grid::xy(chunk_size_x / 32, chunk_size_y / 32);
     let block = Block::xy(chunk_size_x / grid.x, chunk_size_y / grid.y);
 
     let trace_start = Instant::now();
 
-    for chunk_y in 0..(height / chunk_size_y) {
+    for chunk_y in 0..=(height / chunk_size_y) {
         let base_y = chunk_y * chunk_size_y;
-        for chunk_x in 0..(width / chunk_size_x) {
+        for chunk_x in 0..=(width / chunk_size_x) {
             let base_x = chunk_x * chunk_size_x;
             trace(
                 grid,

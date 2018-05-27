@@ -26,8 +26,6 @@ pub unsafe fn trace_inner(
     material_count: usize,
 ) {
     let i = (y * width + x) as isize;
-    *image.offset(i) = BLACK;
-
     if x < width && y < height {
         let ray = Ray::create_prime(
             x as f32,
@@ -38,18 +36,29 @@ pub unsafe fn trace_inner(
         );
 
         let mut polygon_i = 0;
+        let mut closest_distance = 10000000.0;
+        let mut closest_i: isize = -1;
         while (polygon_i < polygon_count) {
             let polygon: &Polygon = &*polygons.offset(polygon_i as isize);
             let maybe_hit = intersection_test(polygon, &ray);
 
             if let Some(distance) = maybe_hit {
-                let material_idx = polygon.material_idx as isize;
-                let color = (&*materials.offset(material_idx)).color;
-                *image.offset(i) = color;
-                break;
+                if (distance < closest_distance) {
+                    closest_distance = distance;
+                    closest_i = polygon_i as isize;
+                }
             }
 
             polygon_i += 1;
+        }
+
+        if closest_i != -1 {
+            let closest_polygon: &Polygon = &*polygons.offset(closest_i);
+            let material_idx = closest_polygon.material_idx as isize;
+            let color = (&*materials.offset(material_idx)).color;
+            *image.offset(i) = color;
+        } else {
+            *image.offset(i) = BLACK;
         }
     }
 }
