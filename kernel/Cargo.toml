@@ -5,4 +5,3 @@ authors = ["Brook Heisler <redattack34@gmail.com>"]
 
 [dependencies]
 common = { path = "../common" }
-rand = "0.5"

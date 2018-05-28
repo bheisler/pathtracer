@@ -28,7 +28,17 @@ pub unsafe fn trace_inner(
 ) {
     let i = (y * width + x) as isize;
     if x < width && y < height {
-        let mut random_seed: u64 = ((x as u64) << 32) + y as u64;
+        let mut random_seed: u64 = ((x as u64) << 32) + ((polygon_count as u64) << 12)
+            + ((width as u64) << 40) + ((height as u64) << 28)
+            + (y as u64);
+
+        // I'm not sure that seed is really all that good, so let's just draw and discard some
+        // random numbers to make sure the internal state is nicely scrambled.
+        let mut i = 0;
+        while i < 10 {
+            random_float(&mut random_seed);
+            i += 1;
+        }
 
         let ray = Ray::create_prime(
             x as f32,
@@ -52,23 +62,38 @@ pub unsafe fn trace_inner(
     }
 }
 
+/// Generates a random floating-point number in the range [0.0, 1.0] using an xorshift* pRNG and
+/// some evil floating-point bit-level hacking. We take the high 32 bits of the output from the
+/// pRNG, mask off the low 23 bits to use as a random mantissa and set the appropriate sign and
+/// exponent bits to turn that mantissa into a floating point value in the [1.0, 2.0] range, then
+/// subtract 1.0 (thus avoiding having to deal with denormals and similar things).
+///
+/// Non-rigorous eyeball checking suggests that the output is at least approximately uniform.
 fn random_float(seed: &mut u64) -> f32 {
-    // TODO: 1.0
+    let mut x = *seed;
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    *seed = x;
+    let random_int = ((x.wrapping_mul(0x2545F4914F6CDD1D)) >> 32) as u32;
+    let float_bits = (random_int & 0x007FFFFF) | 0x3F800000;
+    let float: f32 = unsafe { ::core::mem::transmute(float_bits) };
+    return float - 1.0;
 }
 
-fn create_scatter_direction(normal: &Normal) -> Vector3 {
-    let r1 = random_float(&mut random_seed);
-    let r2 = random_float(&mut random_seed);
+fn create_scatter_direction(normal: &Vector3, random_seed: &mut u64) -> Vector3 {
+    let r1 = random_float(random_seed);
+    let r2 = random_float(random_seed);
 
     let y = r1;
-    let azimuth = r2 * 2 * ::core::f32::consts::PI;
+    let azimuth = r2 * 2.0 * ::core::f32::consts::PI;
     let sin_elevation = sqrt(1.0 - y * y);
     let x = sin_elevation * cos(azimuth);
     let z = sin_elevation * sin(azimuth);
 
     let hemisphere_vec = Vector3 { x, y, z };
 
-    let (n_t, n_b) = create_coordinate_system(&hit_normal);
+    let (n_t, n_b) = create_coordinate_system(normal);
 
     Vector3 {
         x: hemisphere_vec.x * n_b.x + hemisphere_vec.y * normal.x + hemisphere_vec.z * n_t.x,
@@ -250,4 +275,13 @@ mod tests {
         assert_eq!(intersection, 1.0);
     }
 
+    #[test]
+    fn test_rng() {
+        let mut seed = 0xDEADBEEFu64;
+        for x in (0..1000000) {
+            let rand = random_float(&mut seed);
+            assert!(rand >= 0.0);
+            assert!(rand <= 1.0);
+        }
+    }
 }
