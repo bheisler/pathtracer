@@ -23,14 +23,27 @@ const C17D315: f32 = 17.0 / 315.0;
 
 use core::intrinsics;
 
+#[inline]
 pub fn powi(x: f32, i: i32) -> f32 {
     unsafe { intrinsics::powif32(x, i) }
 }
 
+#[inline]
+pub fn fabs(x: f32) -> f32 {
+    unsafe { intrinsics::fabsf32(x) }
+}
+
+#[inline]
+pub fn sqrt(x: f32) -> f32 {
+    unsafe { intrinsics::sqrtf32(x) }
+}
+
+#[inline]
 pub fn sin(x: f32) -> f32 {
     x - powi(x, 3) / C6 + powi(x, 5) / C120 - powi(x, 7) / C5040 + powi(x, 9) / C362880
 }
 
+#[inline]
 pub fn cos(x: f32) -> f32 {
     sin(PI2 - x)
 }

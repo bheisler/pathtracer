@@ -4,7 +4,7 @@
 
 mod color;
 mod material;
-mod math;
+pub mod math;
 mod polygon;
 mod vector;
 

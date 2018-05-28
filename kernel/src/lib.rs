@@ -3,7 +3,8 @@
 
 extern crate common;
 
-use common::{Color, Material, Polygon, Ray};
+use common::math::*;
+use common::{Color, Material, Polygon, Ray, Vector3};
 use core::intrinsics;
 
 const BLACK: Color = Color {
@@ -27,6 +28,8 @@ pub unsafe fn trace_inner(
 ) {
     let i = (y * width + x) as isize;
     if x < width && y < height {
+        let mut random_seed: u64 = ((x as u64) << 32) + y as u64;
+
         let ray = Ray::create_prime(
             x as f32,
             y as f32,
@@ -35,31 +38,88 @@ pub unsafe fn trace_inner(
             fov_adjustment,
         );
 
-        let mut polygon_i = 0;
-        let mut closest_distance = 10000000.0;
-        let mut closest_i: isize = -1;
-        while (polygon_i < polygon_count) {
-            let polygon: &Polygon = &*polygons.offset(polygon_i as isize);
-            let maybe_hit = intersection_test(polygon, &ray);
+        if let Some((distance, hit_poly)) = intersect_scene(&ray, polygon_count, polygons) {
+            let closest_polygon: &Polygon = &*polygons.offset(hit_poly);
 
-            if let Some(distance) = maybe_hit {
-                if (distance < closest_distance) {
-                    closest_distance = distance;
-                    closest_i = polygon_i as isize;
-                }
-            }
+            let hit_normal = closest_polygon.normal;
 
-            polygon_i += 1;
-        }
-
-        if closest_i != -1 {
-            let closest_polygon: &Polygon = &*polygons.offset(closest_i);
             let material_idx = closest_polygon.material_idx as isize;
             let color = (&*materials.offset(material_idx)).color;
             *image.offset(i) = color;
         } else {
             *image.offset(i) = BLACK;
         }
+    }
+}
+
+fn random_float(seed: &mut u64) -> f32 {
+    // TODO: 1.0
+}
+
+fn create_scatter_direction(normal: &Normal) -> Vector3 {
+    let r1 = random_float(&mut random_seed);
+    let r2 = random_float(&mut random_seed);
+
+    let y = r1;
+    let azimuth = r2 * 2 * ::core::f32::consts::PI;
+    let sin_elevation = sqrt(1.0 - y * y);
+    let x = sin_elevation * cos(azimuth);
+    let z = sin_elevation * sin(azimuth);
+
+    let hemisphere_vec = Vector3 { x, y, z };
+
+    let (n_t, n_b) = create_coordinate_system(&hit_normal);
+
+    Vector3 {
+        x: hemisphere_vec.x * n_b.x + hemisphere_vec.y * normal.x + hemisphere_vec.z * n_t.x,
+        y: hemisphere_vec.x * n_b.y + hemisphere_vec.y * normal.y + hemisphere_vec.z * n_t.y,
+        z: hemisphere_vec.x * n_b.z + hemisphere_vec.y * normal.z + hemisphere_vec.z * n_t.z,
+    }
+}
+
+fn create_coordinate_system(normal: &Vector3) -> (Vector3, Vector3) {
+    let n_t = if fabs(normal.x) > fabs(normal.y) {
+        Vector3 {
+            x: normal.z,
+            y: 0.0,
+            z: -normal.x,
+        }.normalize()
+    } else {
+        Vector3 {
+            x: 0.0,
+            y: -normal.z,
+            z: normal.y,
+        }.normalize()
+    };
+    let n_b = normal.cross(n_t);
+    (n_t, n_b)
+}
+
+unsafe fn intersect_scene(
+    ray: &Ray,
+    polygon_count: usize,
+    polygons: *const Polygon,
+) -> Option<(f32, isize)> {
+    let mut polygon_i = 0;
+    let mut closest_distance = 10000000.0;
+    let mut closest_i: isize = -1;
+    while polygon_i < polygon_count {
+        let polygon: &Polygon = &*polygons.offset(polygon_i as isize);
+        let maybe_hit = intersection_test(polygon, ray);
+
+        if let Some(distance) = maybe_hit {
+            if distance < closest_distance {
+                closest_distance = distance;
+                closest_i = polygon_i as isize;
+            }
+        }
+
+        polygon_i += 1;
+    }
+    if closest_i != -1 {
+        Some((closest_distance, closest_i))
+    } else {
+        None
     }
 }
 
@@ -71,7 +131,7 @@ fn intersection_test(polygon: &Polygon, ray: &Ray) -> Option<f32> {
     let n = polygon.normal;
 
     let n_dot_r = n.dot(ray.direction);
-    if unsafe { intrinsics::fabsf32(n_dot_r) } < EPSILON {
+    if fabs(n_dot_r) < EPSILON {
         // The ray is parallel to the triangle. No intersection.
         return None;
     }

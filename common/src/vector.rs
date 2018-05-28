@@ -1,3 +1,5 @@
+use math;
+
 #[derive(Clone, Copy)]
 pub struct Vector3 {
     pub x: f32,
@@ -14,13 +16,15 @@ impl Vector3 {
     }
 
     pub fn length(self) -> f32 {
-        unsafe{ ::core::intrinsics::sqrtf32(self.norm()) }
+        math::sqrt(self.norm())
     }
 
+    #[inline]
     pub fn norm(self) -> f32 {
         (self.x * self.x + self.y * self.y + self.z * self.z)
     }
 
+    #[inline]
     pub fn normalize(self) -> Vector3 {
         let inv_len = self.length().recip();
         Vector3 {
@@ -30,10 +34,12 @@ impl Vector3 {
         }
     }
 
+    #[inline]
     pub fn dot(self, other: Vector3) -> f32 {
         self.x * other.x + self.y * other.y + self.z * other.z
     }
 
+    #[inline]
     pub fn cross(self, other: Vector3) -> Vector3 {
         Vector3 {
             x: self.y * other.z - self.z * other.y,
@@ -42,6 +48,7 @@ impl Vector3 {
         }
     }
 
+    #[inline]
     pub fn add(self, other: Vector3) -> Vector3 {
         Vector3 {
             x: self.x + other.x,
@@ -50,6 +57,7 @@ impl Vector3 {
         }
     }
 
+    #[inline]
     pub fn sub(self, other: Vector3) -> Vector3 {
         Vector3 {
             x: self.x - other.x,
@@ -58,6 +66,7 @@ impl Vector3 {
         }
     }
 
+    #[inline]
     pub fn mul_v(self, other: Vector3) -> Vector3 {
         Vector3 {
             x: self.x * other.x,
@@ -66,6 +75,7 @@ impl Vector3 {
         }
     }
 
+    #[inline]
     pub fn mul_s(self, other: f32) -> Vector3 {
         Vector3 {
             x: self.x * other,
@@ -74,6 +84,7 @@ impl Vector3 {
         }
     }
 
+    #[inline]
     pub fn neg(self) -> Vector3 {
         Vector3 {
             x: -self.x,
@@ -90,18 +101,16 @@ pub struct Ray {
 impl Ray {
     pub fn create_prime(x: f32, y: f32, width: f32, height: f32, fov_adjustment: f32) -> Ray {
         let aspect_ratio = width / height;
-        let sensor_x = ((((x + 0.5) / width) * 2.0 - 1.0) * aspect_ratio) *
-                       fov_adjustment;
+        let sensor_x = ((((x + 0.5) / width) * 2.0 - 1.0) * aspect_ratio) * fov_adjustment;
         let sensor_y = (1.0 - ((y + 0.5) / height) * 2.0) * fov_adjustment;
 
         Ray {
             origin: Vector3::zero(),
             direction: Vector3 {
-                    x: sensor_x,
-                    y: sensor_y,
-                    z: -1.0,
-                }
-                .normalize(),
+                x: sensor_x,
+                y: sensor_y,
+                z: -1.0,
+            }.normalize(),
         }
     }
 }
