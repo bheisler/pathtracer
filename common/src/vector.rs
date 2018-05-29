@@ -7,14 +7,16 @@ pub struct Vector3 {
     pub z: f32,
 }
 impl Vector3 {
+    #[inline]
     pub fn zero() -> Vector3 {
         Vector3::from_one(0.0)
     }
-
+    #[inline]
     pub fn from_one(v: f32) -> Vector3 {
         Vector3 { x: v, y: v, z: v }
     }
 
+    #[inline]
     pub fn length(self) -> f32 {
         math::sqrt(self.norm())
     }
@@ -94,11 +96,13 @@ impl Vector3 {
     }
 }
 
+#[derive(Clone)]
 pub struct Ray {
     pub origin: Vector3,
     pub direction: Vector3,
 }
 impl Ray {
+    #[inline]
     pub fn create_prime(x: f32, y: f32, width: f32, height: f32, fov_adjustment: f32) -> Ray {
         let aspect_ratio = width / height;
         let sensor_x = ((((x + 0.5) / width) * 2.0 - 1.0) * aspect_ratio) * fov_adjustment;

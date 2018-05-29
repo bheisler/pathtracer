@@ -47,3 +47,14 @@ pub fn sin(x: f32) -> f32 {
 pub fn cos(x: f32) -> f32 {
     sin(PI2 - x)
 }
+
+#[inline]
+pub fn clamp(min: f32, value: f32, max: f32) -> f32 {
+    if value < min {
+        min
+    } else if value > max {
+        max
+    } else {
+        value
+    }
+}

@@ -4,14 +4,12 @@
 extern crate common;
 
 use common::math::*;
-use common::{Color, Material, Polygon, Ray, Vector3};
+use common::{Color, Material, Polygon, Ray, Vector3, BLACK, WHITE};
 use core::intrinsics;
 
-const BLACK: Color = Color {
-    red: 0.0,
-    green: 0.0,
-    blue: 0.0,
-};
+const BOUNCE_CAP: u32 = 4;
+const FLOATING_POINT_BACKOFF: f32 = 0.01;
+const RAY_COUNT: u32 = 2048;
 
 #[no_mangle]
 pub unsafe fn trace_inner(
@@ -34,10 +32,10 @@ pub unsafe fn trace_inner(
 
         // I'm not sure that seed is really all that good, so let's just draw and discard some
         // random numbers to make sure the internal state is nicely scrambled.
-        let mut i = 0;
-        while i < 10 {
+        let mut dummy = 0;
+        while dummy < 10 {
             random_float(&mut random_seed);
-            i += 1;
+            dummy += 1;
         }
 
         let ray = Ray::create_prime(
@@ -48,18 +46,69 @@ pub unsafe fn trace_inner(
             fov_adjustment,
         );
 
-        if let Some((distance, hit_poly)) = intersect_scene(&ray, polygon_count, polygons) {
+        let mut color_accumulator = BLACK;
+        let mut ray_num = 0;
+        while ray_num < RAY_COUNT {
+            color_accumulator = color_accumulator.add(
+                get_radiance(&ray, materials, polygons, polygon_count, &mut random_seed)
+                    .mul_s(1.0 / RAY_COUNT as f32),
+            );
+            ray_num += 1;
+        }
+        color_accumulator = color_accumulator.clamp();
+
+        *image.offset(i) = color_accumulator;
+    }
+}
+
+unsafe fn get_radiance(
+    ray: &Ray,
+    materials: *const Material,
+    polygons: *const Polygon,
+    polygon_count: usize,
+    random_seed: &mut u64,
+) -> Color {
+    let mut color_mask = WHITE;
+    let mut color_accumulator = BLACK;
+
+    let mut current_ray = ray.clone();
+
+    let mut i = 0;
+    while i < BOUNCE_CAP {
+        if let Some((distance, hit_poly)) = intersect_scene(&current_ray, polygon_count, polygons) {
             let closest_polygon: &Polygon = &*polygons.offset(hit_poly);
 
             let hit_normal = closest_polygon.normal;
 
             let material_idx = closest_polygon.material_idx as isize;
-            let color = (&*materials.offset(material_idx)).color;
-            *image.offset(i) = color;
+            let material = &*materials.offset(material_idx);
+
+            color_accumulator = color_accumulator.add(material.emission.mul(color_mask));
+
+            let hit_point = current_ray
+                .origin
+                .add(current_ray.direction.mul_s(distance));
+            // Back off along the hit normal a bit to avoid floating-point problems.
+            let hit_point = hit_point.add(hit_normal.mul_s(FLOATING_POINT_BACKOFF));
+
+            let bounce_direction = create_scatter_direction(&hit_normal, random_seed);
+            current_ray = Ray {
+                origin: hit_point,
+                direction: bounce_direction,
+            };
+
+            // Lighting = emission + (incident_light * color * incident_direction dot normal * albedo * PI)
+            let cosine_angle = bounce_direction.dot(hit_normal);
+            let reflected_power = material.albedo * ::core::f32::consts::PI;
+            let reflected_color = material.color.mul_s(cosine_angle).mul_s(reflected_power);
+
+            color_mask = color_mask.mul(reflected_color).mul_s(2.0);
         } else {
-            *image.offset(i) = BLACK;
+            return color_accumulator;
         }
+        i += 1;
     }
+    return color_accumulator;
 }
 
 /// Generates a random floating-point number in the range [0.0, 1.0] using an xorshift* pRNG and

@@ -10,7 +10,7 @@ extern crate obj;
 
 use accel::*;
 use accel_derive::kernel;
-use common::{Color, Material, Polygon, Vector3};
+use common::{Color, Material, Polygon, Vector3, BLACK, WHITE};
 use image::ImageBuffer;
 use obj::Obj;
 use std::path::Path;
@@ -168,16 +168,18 @@ fn main() {
 
     let load_start = Instant::now();
 
-    let mesh_path = Path::new("resources/utah-teapot.obj");
+    let mesh_path = Path::new("resources/box2.obj");
     let mesh: Obj<obj::SimplePolygon> = Obj::load(mesh_path).expect("Failed to load mesh");
 
-    let object_to_world_matrix = Matrix44::translate(0.0, (-3.0 - -1.575), -5.0)
-        * Matrix44::scale_linear(1.0)
+    let object_to_world_matrix = Matrix44::translate(0.0, -2.0, -8.0) * Matrix44::scale_linear(0.1)
         * Matrix44::translate(0.0, -(3.15 / 2.0), 0.0);
-    let teapot_1_polygons = convert_objects_to_polygons(&mesh, 0, object_to_world_matrix);
+    let mut teapot_1_polygons = convert_objects_to_polygons(&mesh, 0, object_to_world_matrix);
     bounding_box(&teapot_1_polygons);
 
-    let object_to_world_matrix = Matrix44::translate(0.0, 7.0, -5.0) * Matrix44::scale_linear(1.0)
+    let mesh_path = Path::new("resources/box.obj");
+    let mesh: Obj<obj::SimplePolygon> = Obj::load(mesh_path).expect("Failed to load mesh");
+
+    let object_to_world_matrix = Matrix44::translate(0.0, 7.0, -5.0) * Matrix44::scale_linear(0.25)
         * Matrix44::translate(0.0, -(3.15 / 2.0), 0.0);
     let teapot_2_polygons = convert_objects_to_polygons(&mesh, 2, object_to_world_matrix);
     bounding_box(&teapot_2_polygons);
@@ -205,25 +207,24 @@ fn main() {
             green: 1.0,
             blue: 0.0,
         },
-        albedo: 0.18,
+        emission: BLACK,
+        albedo: 0.36,
     };
     materials_device[1] = Material {
         // Box
         color: Color {
-            red: 0.25,
-            green: 0.25,
-            blue: 0.25,
+            red: 0.75,
+            green: 0.75,
+            blue: 0.75,
         },
-        albedo: 0.18,
+        emission: BLACK,
+        albedo: 0.36,
     };
     materials_device[2] = Material {
         // Teapot 2
-        color: Color {
-            red: 0.0,
-            green: 0.0,
-            blue: 1.0,
-        },
-        albedo: 0.18,
+        color: WHITE,
+        emission: WHITE.mul_s(2.0),
+        albedo: 0.36,
     };
     let polygon_count = teapot_1_polygons.len() + teapot_2_polygons.len() + box_polygons.len();
     println!("{} polygons in scene", polygon_count);
@@ -237,8 +238,8 @@ fn main() {
         polygons_device[i] = poly;
     }
 
-    let chunk_size_x = 128;
-    let chunk_size_y = 128;
+    let chunk_size_x = 64;
+    let chunk_size_y = 64;
 
     let grid = Grid::xy(chunk_size_x / 32, chunk_size_y / 32);
     let block = Block::xy(chunk_size_x / grid.x, chunk_size_y / grid.y);
