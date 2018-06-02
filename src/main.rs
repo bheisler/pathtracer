@@ -12,9 +12,10 @@ use accel::*;
 use accel_derive::kernel;
 use common::{Color, Material, Polygon, Vector3, BLACK, WHITE};
 use image::ImageBuffer;
+use kernel::ROUND_COUNT;
 use obj::Obj;
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 mod matrix;
 
@@ -30,6 +31,7 @@ pub unsafe fn trace(
     base_y: u32,
     width: u32,
     height: u32,
+    round: u32,
     fov_adjustment: f32,
     image: *mut common::Color,
     polygons: *const common::Polygon,
@@ -47,6 +49,7 @@ pub unsafe fn trace(
         y,
         width,
         height,
+        round,
         fov_adjustment,
         image,
         polygons,
@@ -139,6 +142,10 @@ mod color_ext {
     }
 }
 
+fn to_millis(duration: Duration) -> f32 {
+    ((duration.as_secs() as f32) * 1000.0) + ((duration.subsec_nanos() as f32) / 1000000.0)
+}
+
 fn bounding_box(polygons: &[Polygon]) {
     let mut min_x = 100000.0;
     let mut max_x = -100000.0;
@@ -168,21 +175,20 @@ fn main() {
 
     let load_start = Instant::now();
 
-    let mesh_path = Path::new("resources/box2.obj");
+    let mesh_path = Path::new("resources/utah-teapot.obj");
     let mesh: Obj<obj::SimplePolygon> = Obj::load(mesh_path).expect("Failed to load mesh");
-
-    let object_to_world_matrix = Matrix44::translate(0.0, -2.0, -8.0) * Matrix44::scale_linear(0.1)
+    let object_to_world_matrix = Matrix44::translate(0.0, (-3.0 - -1.575), -5.0)
+        * Matrix44::scale_linear(1.0)
         * Matrix44::translate(0.0, -(3.15 / 2.0), 0.0);
-    let mut teapot_1_polygons = convert_objects_to_polygons(&mesh, 0, object_to_world_matrix);
+    let teapot_1_polygons = convert_objects_to_polygons(&mesh, 0, object_to_world_matrix);
     bounding_box(&teapot_1_polygons);
 
-    let mesh_path = Path::new("resources/box.obj");
+    let mesh_path = Path::new("resources/box2.obj");
     let mesh: Obj<obj::SimplePolygon> = Obj::load(mesh_path).expect("Failed to load mesh");
-
     let object_to_world_matrix = Matrix44::translate(0.0, 7.0, -5.0) * Matrix44::scale_linear(0.25)
         * Matrix44::translate(0.0, -(3.15 / 2.0), 0.0);
-    let teapot_2_polygons = convert_objects_to_polygons(&mesh, 2, object_to_world_matrix);
-    bounding_box(&teapot_2_polygons);
+    let light_polygons = convert_objects_to_polygons(&mesh, 2, object_to_world_matrix);
+    bounding_box(&light_polygons);
 
     let box_path = Path::new("resources/box.obj");
     let box_mesh: Obj<obj::SimplePolygon> = Obj::load(box_path).expect("Failed to load mesh");
@@ -190,11 +196,10 @@ fn main() {
     bounding_box(&box_polygons);
 
     let load_time = load_start.elapsed();
-    println!("Load/Convert Time: {:?}", load_time);
+    println!("Load/Convert Time: {:0.6}ms", to_millis(load_time));
 
-    // TODO: Allow arbitrary image sizes, not just multiples of 32.
-    let width = 1024u32;
-    let height = 736u32;
+    let width = 1024u32 / 4;
+    let height = 736u32 / 4;
     let fov = 90.0f32;
     let fov_adjustment = (fov.to_radians() / 2.0).tan();
     let mut image_device: UVec<Color> = UVec::new((width * height) as usize).unwrap();
@@ -226,19 +231,19 @@ fn main() {
         emission: WHITE.mul_s(2.0),
         albedo: 0.36,
     };
-    let polygon_count = teapot_1_polygons.len() + teapot_2_polygons.len() + box_polygons.len();
+    let polygon_count = teapot_1_polygons.len() + light_polygons.len() + box_polygons.len();
     println!("{} polygons in scene", polygon_count);
     let mut polygons_device: UVec<Polygon> = UVec::new(polygon_count).unwrap();
     for (i, poly) in teapot_1_polygons
         .into_iter()
-        .chain(teapot_2_polygons.into_iter())
+        .chain(light_polygons.into_iter())
         .chain(box_polygons.into_iter())
         .enumerate()
     {
         polygons_device[i] = poly;
     }
 
-    let chunk_size_x = 64;
+    let chunk_size_x = 128;
     let chunk_size_y = 64;
 
     let grid = Grid::xy(chunk_size_x / 32, chunk_size_y / 32);
@@ -250,30 +255,40 @@ fn main() {
         let base_y = chunk_y * chunk_size_y;
         for chunk_x in 0..=(width / chunk_size_x) {
             let base_x = chunk_x * chunk_size_x;
-            trace(
-                grid,
-                block,
-                base_x,
-                base_y,
-                width,
-                height,
-                fov_adjustment,
-                image_device.as_mut_ptr(),
-                polygons_device.as_ptr(),
-                polygon_count,
-                materials_device.as_ptr(),
-                material_count,
-            );
-            let err = device::sync();
-            match err {
-                Err(e) => println!("{:?}", e),
-                Ok(_) => {}
+            let block_start = Instant::now();
+
+            for round in 0..ROUND_COUNT {
+                let round_start = Instant::now();
+                trace(
+                    grid,
+                    block,
+                    base_x,
+                    base_y,
+                    width,
+                    height,
+                    round,
+                    fov_adjustment,
+                    image_device.as_mut_ptr(),
+                    polygons_device.as_ptr(),
+                    polygon_count,
+                    materials_device.as_ptr(),
+                    material_count,
+                );
+                let err = device::sync();
+                match err {
+                    Err(e) => println!("{:?}", e),
+                    Ok(_) => {}
+                }
+                let round_time = round_start.elapsed();
+                println!("Round time: {:0.6}ms", to_millis(round_time));
             }
+            let block_time = block_start.elapsed();
+            println!("Block time: {:0.6}ms", to_millis(block_time));
         }
     }
 
     let trace_time = trace_start.elapsed();
-    println!("Trace time: {:?}", trace_time);
+    println!("Trace time: {:0.6}ms", to_millis(trace_time));
 
     let transfer_start = Instant::now();
     let mut image_host = ImageBuffer::new(width, height);
@@ -281,11 +296,11 @@ fn main() {
         let line_start = y * width;
         for x in 0..width {
             let color = &image_device[(line_start + x) as usize];
-            image_host.put_pixel(x, y, color.to_rgba());
+            image_host.put_pixel(x, y, color.clamp().to_rgba());
         }
     }
     let transfer_time = transfer_start.elapsed();
-    println!("Transfer time: {:?}", transfer_time);
+    println!("Transfer time: {:0.6}ms", to_millis(transfer_time));
 
     image_host.save("image_out.png").unwrap();
 }

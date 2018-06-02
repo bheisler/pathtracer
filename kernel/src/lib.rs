@@ -9,7 +9,14 @@ use core::intrinsics;
 
 const BOUNCE_CAP: u32 = 4;
 const FLOATING_POINT_BACKOFF: f32 = 0.01;
-const RAY_COUNT: u32 = 2048;
+
+// For each block of the image, we trace RAY_COUNT rays, and we trace over each block ROUND_COUNT times.
+// This makes it possible to take many more samples than we can fit into the 3-second window.
+// This has to be tuned based on the complexity of the scene.
+pub const ROUND_COUNT: u32 = 1;
+const RAY_COUNT: u32 = 64;
+
+const RANDOM_SEED: u32 = 0x8802dfb5;
 
 #[no_mangle]
 pub unsafe fn trace_inner(
@@ -17,6 +24,7 @@ pub unsafe fn trace_inner(
     y: u32,
     width: u32,
     height: u32,
+    round: u32,
     fov_adjustment: f32,
     image: *mut Color,
     polygons: *const Polygon,
@@ -26,52 +34,54 @@ pub unsafe fn trace_inner(
 ) {
     let i = (y * width + x) as isize;
     if x < width && y < height {
-        let mut random_seed: u64 = ((x as u64) << 32) + ((polygon_count as u64) << 12)
-            + ((width as u64) << 40) + ((height as u64) << 28)
-            + (y as u64);
+        let mut random_seed: u32 = RANDOM_SEED
+            ^ ((x << 16) + ((polygon_count as u32) << 12) + (width << 23) + (height << 28)
+                + (round << 5) + y);
 
-        // I'm not sure that seed is really all that good, so let's just draw and discard some
-        // random numbers to make sure the internal state is nicely scrambled.
-        let mut dummy = 0;
-        while dummy < 10 {
-            random_float(&mut random_seed);
-            dummy += 1;
-        }
-
-        let ray = Ray::create_prime(
-            x as f32,
-            y as f32,
-            width as f32,
-            height as f32,
-            fov_adjustment,
-        );
-
-        let mut color_accumulator = BLACK;
+        let mut color_accumulator = *image.offset(i);
         let mut ray_num = 0;
         while ray_num < RAY_COUNT {
             color_accumulator = color_accumulator.add(
-                get_radiance(&ray, materials, polygons, polygon_count, &mut random_seed)
-                    .mul_s(1.0 / RAY_COUNT as f32),
+                get_radiance(
+                    x,
+                    y,
+                    width,
+                    height,
+                    fov_adjustment,
+                    materials,
+                    polygons,
+                    polygon_count,
+                    &mut random_seed,
+                ).mul_s(1.0 / (RAY_COUNT * ROUND_COUNT) as f32),
             );
             ray_num += 1;
         }
-        color_accumulator = color_accumulator.clamp();
 
         *image.offset(i) = color_accumulator;
     }
 }
 
 unsafe fn get_radiance(
-    ray: &Ray,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    fov_adjustment: f32,
     materials: *const Material,
     polygons: *const Polygon,
     polygon_count: usize,
-    random_seed: &mut u64,
+    random_seed: &mut u32,
 ) -> Color {
     let mut color_mask = WHITE;
     let mut color_accumulator = BLACK;
 
-    let mut current_ray = ray.clone();
+    let mut current_ray = Ray::create_prime(
+        x as f32,
+        y as f32,
+        width as f32,
+        height as f32,
+        fov_adjustment,
+    );
 
     let mut i = 0;
     while i < BOUNCE_CAP {
@@ -79,12 +89,6 @@ unsafe fn get_radiance(
             let closest_polygon: &Polygon = &*polygons.offset(hit_poly);
 
             let hit_normal = closest_polygon.normal;
-
-            let material_idx = closest_polygon.material_idx as isize;
-            let material = &*materials.offset(material_idx);
-
-            color_accumulator = color_accumulator.add(material.emission.mul(color_mask));
-
             let hit_point = current_ray
                 .origin
                 .add(current_ray.direction.mul_s(distance));
@@ -96,6 +100,11 @@ unsafe fn get_radiance(
                 origin: hit_point,
                 direction: bounce_direction,
             };
+
+            let material_idx = closest_polygon.material_idx as isize;
+            let material = &*materials.offset(material_idx);
+
+            color_accumulator = color_accumulator.add(material.emission.mul(color_mask));
 
             // Lighting = emission + (incident_light * color * incident_direction dot normal * albedo * PI)
             let cosine_angle = bounce_direction.dot(hit_normal);
@@ -111,26 +120,25 @@ unsafe fn get_radiance(
     return color_accumulator;
 }
 
-/// Generates a random floating-point number in the range [0.0, 1.0] using an xorshift* pRNG and
+/// Generates a random floating-point number in the range [0.0, 1.0] using an xorshift32 pRNG and
 /// some evil floating-point bit-level hacking. We take the high 32 bits of the output from the
 /// pRNG, mask off the low 23 bits to use as a random mantissa and set the appropriate sign and
 /// exponent bits to turn that mantissa into a floating point value in the [1.0, 2.0] range, then
 /// subtract 1.0 (thus avoiding having to deal with denormals and similar things).
 ///
 /// Non-rigorous eyeball checking suggests that the output is at least approximately uniform.
-fn random_float(seed: &mut u64) -> f32 {
+fn random_float(seed: &mut u32) -> f32 {
     let mut x = *seed;
-    x ^= x >> 12;
-    x ^= x << 25;
-    x ^= x >> 27;
+    x ^= x >> 13;
+    x ^= x << 17;
+    x ^= x >> 5;
     *seed = x;
-    let random_int = ((x.wrapping_mul(0x2545F4914F6CDD1D)) >> 32) as u32;
-    let float_bits = (random_int & 0x007FFFFF) | 0x3F800000;
+    let float_bits = (x & 0x007FFFFF) | 0x3F800000;
     let float: f32 = unsafe { ::core::mem::transmute(float_bits) };
     return float - 1.0;
 }
 
-fn create_scatter_direction(normal: &Vector3, random_seed: &mut u64) -> Vector3 {
+fn create_scatter_direction(normal: &Vector3, random_seed: &mut u32) -> Vector3 {
     let r1 = random_float(random_seed);
     let r2 = random_float(random_seed);
 
@@ -157,14 +165,15 @@ fn create_coordinate_system(normal: &Vector3) -> (Vector3, Vector3) {
             x: normal.z,
             y: 0.0,
             z: -normal.x,
-        }.normalize()
+        }
     } else {
         Vector3 {
             x: 0.0,
             y: -normal.z,
             z: normal.y,
-        }.normalize()
+        }
     };
+    let n_t = n_t.normalize();
     let n_b = normal.cross(n_t);
     (n_t, n_b)
 }
