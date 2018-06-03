@@ -205,31 +205,24 @@ fn main() {
     let mut image_device: UVec<Color> = UVec::new((width * height) as usize).unwrap();
     let material_count = 3;
     let mut materials_device: UVec<Material> = UVec::new(material_count).unwrap();
-    materials_device[0] = Material {
-        // Teapot 1
+    materials_device[0] = Material::Diffuse {
         color: Color {
             red: 0.0,
             green: 1.0,
             blue: 0.0,
         },
-        emission: BLACK,
         albedo: 0.36,
     };
-    materials_device[1] = Material {
-        // Box
+    materials_device[1] = Material::Diffuse {
         color: Color {
             red: 0.75,
             green: 0.75,
             blue: 0.75,
         },
-        emission: BLACK,
         albedo: 0.36,
     };
-    materials_device[2] = Material {
-        // Teapot 2
-        color: WHITE,
+    materials_device[2] = Material::Emissive {
         emission: WHITE.mul_s(2.0),
-        albedo: 0.36,
     };
     let polygon_count = teapot_1_polygons.len() + light_polygons.len() + box_polygons.len();
     println!("{} polygons in scene", polygon_count);
@@ -246,8 +239,8 @@ fn main() {
     let chunk_size_x = 128;
     let chunk_size_y = 64;
 
-    let grid = Grid::xy(chunk_size_x / 32, chunk_size_y / 32);
-    let block = Block::xy(chunk_size_x / grid.x, chunk_size_y / grid.y);
+    let block = Block::xy(32, 32);
+    let grid = Grid::xy(chunk_size_x / block.x, chunk_size_y / block.y);
 
     let trace_start = Instant::now();
 

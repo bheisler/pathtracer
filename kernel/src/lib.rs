@@ -1,11 +1,9 @@
 #![no_std]
-#![feature(core_intrinsics)]
 
 extern crate common;
 
 use common::math::*;
 use common::{Color, Material, Polygon, Ray, Vector3, BLACK, WHITE};
-use core::intrinsics;
 
 const BOUNCE_CAP: u32 = 4;
 const FLOATING_POINT_BACKOFF: f32 = 0.01;
@@ -13,7 +11,7 @@ const FLOATING_POINT_BACKOFF: f32 = 0.01;
 // For each block of the image, we trace RAY_COUNT rays, and we trace over each block ROUND_COUNT times.
 // This makes it possible to take many more samples than we can fit into the 3-second window.
 // This has to be tuned based on the complexity of the scene.
-pub const ROUND_COUNT: u32 = 1;
+pub const ROUND_COUNT: u32 = 8;
 const RAY_COUNT: u32 = 64;
 
 const RANDOM_SEED: u32 = 0x8802dfb5;
@@ -93,25 +91,27 @@ unsafe fn get_radiance(
                 .origin
                 .add(current_ray.direction.mul_s(distance));
             // Back off along the hit normal a bit to avoid floating-point problems.
-            let hit_point = hit_point.add(hit_normal.mul_s(FLOATING_POINT_BACKOFF));
-
-            let bounce_direction = create_scatter_direction(&hit_normal, random_seed);
-            current_ray = Ray {
-                origin: hit_point,
-                direction: bounce_direction,
-            };
+            current_ray.origin = hit_point.add(hit_normal.mul_s(FLOATING_POINT_BACKOFF));
 
             let material_idx = closest_polygon.material_idx as isize;
             let material = &*materials.offset(material_idx);
 
-            color_accumulator = color_accumulator.add(material.emission.mul(color_mask));
+            match material {
+                Material::Diffuse { color, albedo } => {
+                    current_ray.direction = create_scatter_direction(&hit_normal, random_seed);
+                    // Lighting = emission + (incident_light * color * incident_direction dot normal * albedo * PI)
+                    let cosine_angle = current_ray.direction.dot(hit_normal);
+                    let reflected_power = albedo * ::core::f32::consts::PI;
+                    let reflected_color = color.mul_s(cosine_angle).mul_s(reflected_power);
 
-            // Lighting = emission + (incident_light * color * incident_direction dot normal * albedo * PI)
-            let cosine_angle = bounce_direction.dot(hit_normal);
-            let reflected_power = material.albedo * ::core::f32::consts::PI;
-            let reflected_color = material.color.mul_s(cosine_angle).mul_s(reflected_power);
-
-            color_mask = color_mask.mul(reflected_color).mul_s(2.0);
+                    color_mask = color_mask.mul(reflected_color).mul_s(2.0);
+                }
+                Material::Emissive { emission } => {
+                    current_ray.direction = create_scatter_direction(&hit_normal, random_seed);
+                    color_accumulator = color_accumulator.add(emission.mul(color_mask));
+                    // Leave the color mask as-is, I guess?
+                }
+            }
         } else {
             return color_accumulator;
         }

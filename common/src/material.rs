@@ -1,7 +1,6 @@
 use color::Color;
 
-pub struct Material {
-    pub color: Color,
-    pub emission: Color,
-    pub albedo: f32,
+pub enum Material {
+    Diffuse { color: Color, albedo: f32 },
+    Emissive { emission: Color },
 }
