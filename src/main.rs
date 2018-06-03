@@ -10,7 +10,7 @@ extern crate obj;
 
 use accel::*;
 use accel_derive::kernel;
-use common::{Color, Material, Polygon, Vector3, BLACK, WHITE};
+use common::{Color, Material, Polygon, ScratchSpace, Vector3, WHITE};
 use image::ImageBuffer;
 use kernel::ROUND_COUNT;
 use obj::Obj;
@@ -38,11 +38,20 @@ pub unsafe fn trace(
     polygon_count: usize,
     materials: *const common::Material,
     material_count: usize,
+    scratch_space: *mut common::ScratchSpace,
+    scratch_space_count: usize,
 ) {
     use accel_core::*;
 
-    let x = base_x + (nvptx_block_idx_x() * nvptx_block_dim_x() + nvptx_thread_idx_x()) as u32;
-    let y = base_y + (nvptx_block_idx_y() * nvptx_block_dim_y() + nvptx_thread_idx_y()) as u32;
+    let thread_x = (nvptx_block_idx_x() * nvptx_block_dim_x() + nvptx_thread_idx_x());
+    let thread_y = (nvptx_block_idx_y() * nvptx_block_dim_y() + nvptx_thread_idx_y());
+
+    let x = base_x + thread_x as u32;
+    let y = base_y + thread_y as u32;
+
+    let scratch_i = (thread_y * (nvptx_grid_dim_x() * nvptx_block_dim_x()) + thread_x) as isize;
+
+    let scratch = &mut (*scratch_space.offset(scratch_i));
 
     kernel::trace_inner(
         x,
@@ -56,6 +65,7 @@ pub unsafe fn trace(
         polygon_count,
         materials,
         material_count,
+        scratch,
     );
 }
 
@@ -243,8 +253,11 @@ fn main() {
 
     let chunk_size_x = 128;
     let chunk_size_y = 64;
+    let thread_count = (chunk_size_x * chunk_size_y) as usize;
 
-    let block = Block::xy(32, 32);
+    let mut scratch_space: UVec<ScratchSpace> = UVec::new(thread_count).unwrap();
+
+    let block = Block::xy(32, 16);
     let grid = Grid::xy(chunk_size_x / block.x, chunk_size_y / block.y);
 
     let trace_start = Instant::now();
@@ -271,6 +284,8 @@ fn main() {
                     polygon_count,
                     materials_device.as_ptr(),
                     material_count,
+                    scratch_space.as_mut_ptr(),
+                    thread_count,
                 );
                 let err = device::sync();
                 match err {

@@ -3,7 +3,7 @@
 extern crate common;
 
 use common::math::*;
-use common::{Color, Material, Polygon, Ray, Vector3, BLACK, WHITE};
+use common::{Color, Material, Polygon, Ray, ScratchSpace, Vector3, BLACK, WHITE};
 
 const BOUNCE_CAP: u32 = 4;
 const FLOATING_POINT_BACKOFF: f32 = 0.01;
@@ -12,7 +12,7 @@ const FLOATING_POINT_BACKOFF: f32 = 0.01;
 // This makes it possible to take many more samples than we can fit into the 3-second window.
 // This has to be tuned based on the complexity of the scene.
 pub const ROUND_COUNT: u32 = 8;
-const RAY_COUNT: u32 = 32;
+const RAY_COUNT: u32 = 16;
 
 const RANDOM_SEED: u32 = 0x8802dfb5;
 
@@ -28,7 +28,8 @@ pub unsafe fn trace_inner(
     polygons: *const Polygon,
     polygon_count: usize,
     materials: *const Material,
-    material_count: usize,
+    _material_count: usize,
+    scratch_space: &mut ScratchSpace,
 ) {
     let i = (y * width + x) as isize;
     if x < width && y < height {
@@ -50,6 +51,7 @@ pub unsafe fn trace_inner(
                     polygons,
                     polygon_count,
                     &mut random_seed,
+                    scratch_space,
                 ).mul_s(1.0 / (RAY_COUNT * ROUND_COUNT) as f32),
             );
             ray_num += 1;
@@ -69,59 +71,75 @@ unsafe fn get_radiance(
     polygons: *const Polygon,
     polygon_count: usize,
     random_seed: &mut u32,
+    scratch_space: &mut ScratchSpace,
 ) -> Color {
-    let mut color_mask = WHITE;
     let mut color_accumulator = BLACK;
 
-    let mut current_ray = Ray::create_prime(
+    scratch_space.num_rays = 0;
+    scratch_space.rays[0] = Ray::create_prime(
         x as f32,
         y as f32,
         width as f32,
         height as f32,
         fov_adjustment,
     );
+    scratch_space.masks[0] = WHITE;
 
-    let mut i = 0;
-    while i < BOUNCE_CAP {
-        if let Some((distance, hit_poly)) = intersect_scene(&current_ray, polygon_count, polygons) {
-            let closest_polygon: &Polygon = &*polygons.offset(hit_poly);
+    let mut bounce_i = 0;
+    while bounce_i < BOUNCE_CAP {
+        let mut ray_i = scratch_space.num_rays;
+        while ray_i >= 0 {
+            let ray_u = ray_i as usize;
+            let mut current_ray = scratch_space.rays.get_unchecked(ray_u).clone();
+            let mut color_mask = scratch_space.masks.get_unchecked(ray_u).clone();
 
-            let hit_normal = closest_polygon.normal;
-            let hit_point = current_ray
-                .origin
-                .add(current_ray.direction.mul_s(distance));
-            // Back off along the hit normal a bit to avoid floating-point problems.
-            current_ray.origin = hit_point.add(hit_normal.mul_s(FLOATING_POINT_BACKOFF));
+            if let Some((distance, hit_poly)) =
+                intersect_scene(&current_ray, polygon_count, polygons)
+            {
+                let closest_polygon: &Polygon = &*polygons.offset(hit_poly);
 
-            let material_idx = closest_polygon.material_idx as isize;
-            let material = &*materials.offset(material_idx);
+                let hit_normal = closest_polygon.normal;
+                let hit_point = current_ray
+                    .origin
+                    .add(current_ray.direction.mul_s(distance));
+                // Back off along the hit normal a bit to avoid floating-point problems.
+                current_ray.origin = hit_point.add(hit_normal.mul_s(FLOATING_POINT_BACKOFF));
 
-            match material {
-                Material::Diffuse { color, albedo } => {
-                    current_ray.direction = create_scatter_direction(&hit_normal, random_seed);
-                    // Lighting = emission + (incident_light * color * incident_direction dot normal * albedo * PI)
-                    let cosine_angle = current_ray.direction.dot(hit_normal);
-                    let reflected_power = albedo * ::core::f32::consts::PI;
-                    let reflected_color = color.mul_s(cosine_angle).mul_s(reflected_power);
+                let material_idx = closest_polygon.material_idx as isize;
+                let material = &*materials.offset(material_idx);
 
-                    color_mask = color_mask.mul(reflected_color).mul_s(2.0);
+                match material {
+                    Material::Diffuse { color, albedo } => {
+                        current_ray.direction = create_scatter_direction(&hit_normal, random_seed);
+                        // Lighting = emission + (incident_light * color * incident_direction dot normal * albedo * PI)
+                        let cosine_angle = current_ray.direction.dot(hit_normal);
+                        let reflected_power = albedo * ::core::f32::consts::PI;
+                        let reflected_color = color.mul_s(cosine_angle).mul_s(reflected_power);
+
+                        color_mask = color_mask.mul(reflected_color).mul_s(2.0);
+                    }
+                    Material::Emissive { emission } => {
+                        current_ray.direction = create_scatter_direction(&hit_normal, random_seed);
+                        color_accumulator = color_accumulator.add(emission.mul(color_mask));
+                        // Leave the color mask as-is, I guess?
+                    }
+                    Material::Reflective {} => {
+                        // Leave the mask and accumulator, just generate a new reflected ray
+                        current_ray.direction = current_ray
+                            .direction
+                            .sub(hit_normal.mul_s(2.0 * current_ray.direction.dot(hit_normal)));
+                    }
                 }
-                Material::Emissive { emission } => {
-                    current_ray.direction = create_scatter_direction(&hit_normal, random_seed);
-                    color_accumulator = color_accumulator.add(emission.mul(color_mask));
-                    // Leave the color mask as-is, I guess?
-                }
-                Material::Reflective {} => {
-                    // Leave the mask and accumulator, just generate a new reflected ray
-                    current_ray.direction = current_ray
-                        .direction
-                        .sub(hit_normal.mul_s(2.0 * current_ray.direction.dot(hit_normal)));
-                }
+            } else {
+                color_mask = BLACK;
             }
-        } else {
-            return color_accumulator;
+
+            *scratch_space.rays.get_unchecked_mut(ray_u) = current_ray;
+            *scratch_space.masks.get_unchecked_mut(ray_u) = color_mask;
+
+            ray_i = ray_i - 1;
         }
-        i += 1;
+        bounce_i += 1;
     }
     return color_accumulator;
 }
