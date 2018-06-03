@@ -177,23 +177,25 @@ fn main() {
 
     let mesh_path = Path::new("resources/utah-teapot.obj");
     let mesh: Obj<obj::SimplePolygon> = Obj::load(mesh_path).expect("Failed to load mesh");
-    let object_to_world_matrix = Matrix44::translate(0.0, (-3.0 - -1.575), -5.0)
+    let object_to_world_matrix = Matrix44::translate(0.0, -3.0 - -1.575, -5.0)
         * Matrix44::scale_linear(1.0)
         * Matrix44::translate(0.0, -(3.15 / 2.0), 0.0);
     let teapot_1_polygons = convert_objects_to_polygons(&mesh, 0, object_to_world_matrix);
-    bounding_box(&teapot_1_polygons);
+
+    let object_to_world_matrix = Matrix44::translate(-4.0, -3.0 - -1.575, -6.0)
+        * Matrix44::scale_linear(0.6)
+        * Matrix44::translate(0.0, -(3.15 / 2.0), 0.0);
+    let teapot_2_polygons = convert_objects_to_polygons(&mesh, 3, object_to_world_matrix);
 
     let mesh_path = Path::new("resources/box2.obj");
     let mesh: Obj<obj::SimplePolygon> = Obj::load(mesh_path).expect("Failed to load mesh");
     let object_to_world_matrix = Matrix44::translate(0.0, 7.0, -5.0) * Matrix44::scale_linear(0.25)
         * Matrix44::translate(0.0, -(3.15 / 2.0), 0.0);
     let light_polygons = convert_objects_to_polygons(&mesh, 2, object_to_world_matrix);
-    bounding_box(&light_polygons);
 
     let box_path = Path::new("resources/box.obj");
     let box_mesh: Obj<obj::SimplePolygon> = Obj::load(box_path).expect("Failed to load mesh");
     let box_polygons = convert_objects_to_polygons(&box_mesh, 1, Matrix44::identity());
-    bounding_box(&box_polygons);
 
     let load_time = load_start.elapsed();
     println!("Load/Convert Time: {:0.6}ms", to_millis(load_time));
@@ -203,7 +205,7 @@ fn main() {
     let fov = 90.0f32;
     let fov_adjustment = (fov.to_radians() / 2.0).tan();
     let mut image_device: UVec<Color> = UVec::new((width * height) as usize).unwrap();
-    let material_count = 3;
+    let material_count = 4;
     let mut materials_device: UVec<Material> = UVec::new(material_count).unwrap();
     materials_device[0] = Material::Diffuse {
         color: Color {
@@ -224,11 +226,14 @@ fn main() {
     materials_device[2] = Material::Emissive {
         emission: WHITE.mul_s(2.0),
     };
-    let polygon_count = teapot_1_polygons.len() + light_polygons.len() + box_polygons.len();
+    materials_device[3] = Material::Reflective {};
+    let polygon_count = teapot_1_polygons.len() + teapot_2_polygons.len() + light_polygons.len()
+        + box_polygons.len();
     println!("{} polygons in scene", polygon_count);
     let mut polygons_device: UVec<Polygon> = UVec::new(polygon_count).unwrap();
     for (i, poly) in teapot_1_polygons
         .into_iter()
+        .chain(teapot_2_polygons.into_iter())
         .chain(light_polygons.into_iter())
         .chain(box_polygons.into_iter())
         .enumerate()

@@ -12,7 +12,7 @@ const FLOATING_POINT_BACKOFF: f32 = 0.01;
 // This makes it possible to take many more samples than we can fit into the 3-second window.
 // This has to be tuned based on the complexity of the scene.
 pub const ROUND_COUNT: u32 = 8;
-const RAY_COUNT: u32 = 64;
+const RAY_COUNT: u32 = 32;
 
 const RANDOM_SEED: u32 = 0x8802dfb5;
 
@@ -110,6 +110,12 @@ unsafe fn get_radiance(
                     current_ray.direction = create_scatter_direction(&hit_normal, random_seed);
                     color_accumulator = color_accumulator.add(emission.mul(color_mask));
                     // Leave the color mask as-is, I guess?
+                }
+                Material::Reflective {} => {
+                    // Leave the mask and accumulator, just generate a new reflected ray
+                    current_ray.direction = current_ray
+                        .direction
+                        .sub(hit_normal.mul_s(2.0 * current_ray.direction.dot(hit_normal)));
                 }
             }
         } else {
