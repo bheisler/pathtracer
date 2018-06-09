@@ -12,7 +12,7 @@ mod vector;
 
 pub use color::{Color, BLACK, WHITE};
 pub use material::Material;
-pub use object::Object;
+pub use object::{BoundingBox, Object};
 pub use polygon::Polygon;
 pub use scratch::ScratchSpace;
 pub use vector::Ray;

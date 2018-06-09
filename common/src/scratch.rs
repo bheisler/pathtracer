@@ -9,6 +9,7 @@ pub struct ScratchSpace {
     pub num_rays: i32,
     pub rays_traced: u64,
     pub triangle_intersections: u64,
+    pub bounding_box_intersections: u64,
 }
 impl ScratchSpace {
     #[inline]

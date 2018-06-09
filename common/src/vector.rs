@@ -94,6 +94,15 @@ impl Vector3 {
             z: -self.z,
         }
     }
+
+    #[inline]
+    pub fn inverse(self) -> Vector3 {
+        Vector3 {
+            x: 1.0 / self.x,
+            y: 1.0 / self.y,
+            z: 1.0 / self.z,
+        }
+    }
 }
 
 #[derive(Clone)]

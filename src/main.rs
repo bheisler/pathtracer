@@ -10,7 +10,9 @@ extern crate obj;
 
 use accel::*;
 use accel_derive::kernel;
-use common::{Color, Material, Object, Polygon, Ray, ScratchSpace, Vector3, BLACK, WHITE};
+use common::{
+    BoundingBox, Color, Material, Object, Polygon, Ray, ScratchSpace, Vector3, BLACK, WHITE,
+};
 use image::ImageBuffer;
 use kernel::ROUND_COUNT;
 use obj::Obj;
@@ -117,6 +119,7 @@ fn make_object(
         polygon_start,
         polygon_end,
         material,
+        bounding_box: bounding_box(&all_polygons[polygon_start..polygon_end]),
     }
 }
 
@@ -153,28 +156,26 @@ fn to_millis(duration: Duration) -> f32 {
     ((duration.as_secs() as f32) * 1000.0) + ((duration.subsec_nanos() as f32) / 1000000.0)
 }
 
-fn bounding_box(polygons: &[Polygon]) {
-    let mut min_x = 100000.0;
-    let mut max_x = -100000.0;
-    let mut min_y = 100000.0;
-    let mut max_y = -100000.0;
-    let mut min_z = 100000.0;
-    let mut max_z = -100000.0;
+fn bounding_box(polygons: &[Polygon]) -> BoundingBox {
+    let mut bounding_box = BoundingBox {
+        min_x: 100000.0,
+        max_x: -100000.0,
+        min_y: 100000.0,
+        max_y: -100000.0,
+        min_z: 100000.0,
+        max_z: -100000.0,
+    };
     for p in polygons {
         for v in &p.vertices {
-            min_x = v.x.min(min_x);
-            max_x = v.x.max(max_x);
-            min_y = v.y.min(min_y);
-            max_y = v.y.max(max_y);
-            min_z = v.z.min(min_z);
-            max_z = v.z.max(max_z);
+            bounding_box.min_x = v.x.min(bounding_box.min_x);
+            bounding_box.max_x = v.x.max(bounding_box.max_x);
+            bounding_box.min_y = v.y.min(bounding_box.min_y);
+            bounding_box.max_y = v.y.max(bounding_box.max_y);
+            bounding_box.min_z = v.z.min(bounding_box.min_z);
+            bounding_box.max_z = v.z.max(bounding_box.max_z);
         }
     }
-
-    println!("Bounding box:");
-    println!("X: {} - {}", min_x, max_x);
-    println!("y: {} - {}", min_y, max_y);
-    println!("z: {} - {}", min_z, max_z);
+    bounding_box
 }
 
 fn trace_gpu(
@@ -192,10 +193,6 @@ fn trace_gpu(
     let thread_count = (chunk_size_x * chunk_size_y) as usize;
 
     let mut scratch_space: UVec<ScratchSpace> = UVec::new(thread_count).unwrap();
-    for i in 0..thread_count {
-        scratch_space[i].rays_traced = 0;
-        scratch_space[i].triangle_intersections = 0;
-    }
 
     let block = Block::xy(32, 16);
     let grid = Grid::xy(chunk_size_x / block.x, chunk_size_y / block.y);
@@ -247,14 +244,20 @@ fn trace_gpu(
 
     let mut rays_traced = 0u64;
     let mut triangle_intersections = 0u64;
+    let mut bounding_box_intersections = 0u64;
     for i in 0..thread_count {
         // Some of the scratch-spaces are trashed for reasons unknown. Just ignore those.
         if scratch_space[i].rays_traced < 1_000_000 {
             rays_traced += scratch_space[i].rays_traced;
             triangle_intersections += scratch_space[i].triangle_intersections;
+            bounding_box_intersections += scratch_space[i].bounding_box_intersections;
         }
     }
     println!("Traced {} rays", rays_traced);
+    println!(
+        "Performed {} bounding-box intersections",
+        bounding_box_intersections
+    );
     println!(
         "Performed {} triangle intersections",
         triangle_intersections
@@ -305,6 +308,7 @@ fn trace_cpu(
         num_rays: 0,
         rays_traced: 0,
         triangle_intersections: 0,
+        bounding_box_intersections: 0,
     };
 
     let trace_start = Instant::now();
@@ -435,7 +439,6 @@ fn main() {
     let height = 736u32 / 4;
     let fov = 90.0f32;
     let fov_adjustment = (fov.to_radians() / 2.0).tan();
-    let material_count = 5;
     println!("{} polygons in scene", all_polygons.len());
 
     let mut polygons_device: UVec<Polygon> = UVec::new(all_polygons.len()).unwrap();

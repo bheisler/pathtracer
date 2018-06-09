@@ -3,7 +3,10 @@
 extern crate common;
 
 use common::math::*;
-use common::{Color, Material, Object, Polygon, Ray, ScratchSpace, Vector3, BLACK, WHITE};
+use common::{
+    BoundingBox, Color, Material, Object, Polygon, Ray, ScratchSpace, Vector3, BLACK, WHITE,
+};
+use core::mem::swap;
 
 const BOUNCE_CAP: u32 = 4;
 const FLOATING_POINT_BACKOFF: f32 = 0.01;
@@ -19,6 +22,7 @@ const RANDOM_SEED: u32 = 0x8802dfb5;
 struct Stats {
     rays_traced: u64,
     triangle_intersections: u64,
+    bounding_box_intersections: u64,
 }
 
 #[no_mangle]
@@ -38,6 +42,7 @@ pub unsafe fn trace_inner(
     let mut stats = Stats {
         rays_traced: 0,
         triangle_intersections: 0,
+        bounding_box_intersections: 0,
     };
 
     let i = (y * width + x) as isize;
@@ -79,6 +84,7 @@ pub unsafe fn trace_inner(
 
         *image.offset(i) = color_accumulator;
         scratch_space.rays_traced += stats.rays_traced;
+        scratch_space.bounding_box_intersections += stats.bounding_box_intersections;
         scratch_space.triangle_intersections += stats.triangle_intersections;
     }
 }
@@ -307,23 +313,27 @@ unsafe fn intersect_scene(
     let mut object_i = 0;
     while object_i < object_count {
         let object = &*objects.offset(object_i as isize);
-        let mut polygon_i = object.polygon_start;
-        let polygon_end = object.polygon_end;
-        while polygon_i < polygon_end {
-            stats.triangle_intersections += 1;
-            let polygon: &Polygon = &*polygons.offset(polygon_i as isize);
-            let maybe_hit = intersection_test(polygon, ray);
+        stats.bounding_box_intersections += 1;
+        if test_bounding_box(&object.bounding_box, ray) {
+            let mut polygon_i = object.polygon_start;
+            let polygon_end = object.polygon_end;
+            while polygon_i < polygon_end {
+                stats.triangle_intersections += 1;
+                let polygon: &Polygon = &*polygons.offset(polygon_i as isize);
+                let maybe_hit = intersection_test(polygon, ray);
 
-            if let Some((distance, normal)) = maybe_hit {
-                if distance < closest_distance {
-                    closest_distance = distance;
-                    closest_normal = normal;
-                    closest_obj_i = object_i as isize;
+                if let Some((distance, normal)) = maybe_hit {
+                    if distance < closest_distance {
+                        closest_distance = distance;
+                        closest_normal = normal;
+                        closest_obj_i = object_i as isize;
+                    }
                 }
-            }
 
-            polygon_i += 1;
+                polygon_i += 1;
+            }
         }
+
         object_i += 1;
     }
 
@@ -335,6 +345,43 @@ unsafe fn intersect_scene(
 }
 
 const EPSILON: f32 = 0.00001;
+
+fn test_bounding_box(bounding_box: &BoundingBox, ray: &Ray) -> bool {
+    let dir_inv = ray.direction.inverse();
+
+    let mut tmin = (bounding_box.min_x - ray.origin.x) * dir_inv.x;
+    let mut tmax = (bounding_box.max_x - ray.origin.x) * dir_inv.x;
+
+    if tmin > tmax {
+        swap(&mut tmin, &mut tmax);
+    }
+
+    let mut tymin = (bounding_box.min_y - ray.origin.y) * dir_inv.y;
+    let mut tymax = (bounding_box.max_y - ray.origin.y) * dir_inv.y;
+
+    if tymin > tymax {
+        swap(&mut tymin, &mut tymax);
+    }
+
+    if tmin > tymax || tymin > tmax {
+        return false;
+    }
+
+    tmin = max(tmin, tymin);
+    tmax = min(tymax, tmax);
+
+    let mut tzmin = (bounding_box.min_z - ray.origin.z) * dir_inv.z;
+    let mut tzmax = (bounding_box.max_z - ray.origin.z) * dir_inv.z;
+
+    if tzmin > tzmax {
+        swap(&mut tzmin, &mut tzmax);
+    }
+
+    if tmin > tzmax || tzmin > tmax {
+        return false;
+    }
+    true
+}
 
 fn intersection_test(polygon: &Polygon, ray: &Ray) -> Option<(f32, Vector3)> {
     let v0 = polygon.vertices[0];
