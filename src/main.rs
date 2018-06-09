@@ -10,7 +10,7 @@ extern crate obj;
 
 use accel::*;
 use accel_derive::kernel;
-use common::{Color, Material, Polygon, Ray, ScratchSpace, Vector3, BLACK, WHITE};
+use common::{Color, Material, Object, Polygon, Ray, ScratchSpace, Vector3, BLACK, WHITE};
 use image::ImageBuffer;
 use kernel::ROUND_COUNT;
 use obj::Obj;
@@ -35,9 +35,8 @@ pub unsafe fn trace(
     fov_adjustment: f32,
     image: *mut common::Color,
     polygons: *const common::Polygon,
-    polygon_count: usize,
-    materials: *const common::Material,
-    material_count: usize,
+    objects: *const common::Object,
+    object_count: usize,
     scratch_space: *mut common::ScratchSpace,
 ) {
     use accel_core::*;
@@ -61,19 +60,19 @@ pub unsafe fn trace(
         fov_adjustment,
         image,
         polygons,
-        polygon_count,
-        materials,
-        material_count,
+        objects,
+        object_count,
         scratch,
     );
 }
 
-fn convert_objects_to_polygons(
+fn make_object(
+    all_polygons: &mut Vec<Polygon>,
     obj: &Obj<obj::SimplePolygon>,
-    material_idx: usize,
+    material: Material,
     object_to_world: Matrix44,
-) -> Vec<Polygon> {
-    let mut polygons = vec![];
+) -> Object {
+    let polygon_start = all_polygons.len();
 
     let make_vector = |floats: &[f32; 3]| {
         let v = Vector3 {
@@ -97,7 +96,6 @@ fn convert_objects_to_polygons(
 
         Polygon {
             vertices: [vertex1, vertex2, vertex3],
-            material_idx,
         }
     };
 
@@ -107,13 +105,19 @@ fn convert_objects_to_polygons(
                 let index1 = poly[0];
                 for others in poly[1..].windows(2) {
                     let polygon = make_polygon(index1, others[0], others[1]);
-                    polygons.push(polygon);
+                    all_polygons.push(polygon);
                 }
             }
         }
     }
 
-    return polygons;
+    let polygon_end = all_polygons.len();
+
+    Object {
+        polygon_start,
+        polygon_end,
+        material,
+    }
 }
 
 // This has to go here because the powf function doesn't exist in no_std and the intrisic breaks
@@ -178,7 +182,7 @@ fn trace_gpu(
     width: u32,
     fov_adjustment: f32,
     polygons: UVec<Polygon>,
-    materials: UVec<Material>,
+    objects: UVec<Object>,
 ) {
     use color_ext::ColorExt;
     let mut image_device: UVec<Color> = UVec::new((width * height) as usize).unwrap();
@@ -217,9 +221,8 @@ fn trace_gpu(
                     fov_adjustment,
                     image_device.as_mut_ptr(),
                     polygons.as_ptr(),
-                    polygons.len(),
-                    materials.as_ptr(),
-                    materials.len(),
+                    objects.as_ptr(),
+                    objects.len(),
                     scratch_space.as_mut_ptr(),
                 );
                 let err = device::sync();
@@ -277,7 +280,7 @@ fn trace_cpu(
     width: u32,
     fov_adjustment: f32,
     polygons: UVec<Polygon>,
-    materials: UVec<Material>,
+    objects: UVec<Object>,
 ) {
     use color_ext::ColorExt;
     let mut image_device: UVec<Color> = UVec::new((width * height) as usize).unwrap();
@@ -319,9 +322,8 @@ fn trace_cpu(
                         fov_adjustment,
                         image_device.as_mut_ptr(),
                         polygons.as_ptr(),
-                        polygons.len(),
-                        materials.as_ptr(),
-                        materials.len(),
+                        objects.as_ptr(),
+                        objects.len(),
                         &mut scratch_space,
                     );
                 }
@@ -350,32 +352,81 @@ fn trace_cpu(
 fn main() {
     let load_start = Instant::now();
 
+    let mut all_polygons = vec![];
+    let mut all_objects = vec![];
+
     let mesh_path = Path::new("resources/utah-teapot.obj");
     let mesh: Obj<obj::SimplePolygon> = Obj::load(mesh_path).expect("Failed to load mesh");
     let object_to_world_matrix = Matrix44::translate(0.0, -3.0 - -1.575, -5.0)
         * Matrix44::scale_linear(1.0)
         * Matrix44::translate(0.0, -(3.15 / 2.0), 0.0);
-    let teapot_1_polygons = convert_objects_to_polygons(&mesh, 0, object_to_world_matrix);
+    let teapot_1_material = Material::Refractive { index: 1.5 };
+    all_objects.push(make_object(
+        &mut all_polygons,
+        &mesh,
+        teapot_1_material,
+        object_to_world_matrix,
+    ));
 
     let object_to_world_matrix = Matrix44::translate(-4.0, -3.0 - -1.575, -6.0)
         * Matrix44::scale_linear(0.6)
         * Matrix44::translate(0.0, -(3.15 / 2.0), 0.0);
-    let teapot_2_polygons = convert_objects_to_polygons(&mesh, 3, object_to_world_matrix);
+    let teapot_2_material = Material::Reflective;
+    all_objects.push(make_object(
+        &mut all_polygons,
+        &mesh,
+        teapot_2_material,
+        object_to_world_matrix,
+    ));
 
     let object_to_world_matrix = Matrix44::translate(4.0, -3.0 - -1.575, -6.0)
         * Matrix44::scale_linear(0.6)
         * Matrix44::translate(0.0, -(3.15 / 2.0), 0.0);
-    let teapot_3_polygons = convert_objects_to_polygons(&mesh, 4, object_to_world_matrix);
+    let teapot_3_material = Material::Diffuse {
+        color: Color {
+            red: 0.0,
+            green: 1.0,
+            blue: 0.0,
+        },
+        albedo: 0.36,
+    };
+    all_objects.push(make_object(
+        &mut all_polygons,
+        &mesh,
+        teapot_3_material,
+        object_to_world_matrix,
+    ));
 
     let mesh_path = Path::new("resources/box2.obj");
     let mesh: Obj<obj::SimplePolygon> = Obj::load(mesh_path).expect("Failed to load mesh");
     let object_to_world_matrix = Matrix44::translate(0.0, 7.0, -5.0) * Matrix44::scale_linear(0.25)
         * Matrix44::translate(0.0, -(3.15 / 2.0), 0.0);
-    let light_polygons = convert_objects_to_polygons(&mesh, 2, object_to_world_matrix);
+    let light_material = Material::Emissive {
+        emission: WHITE.mul_s(2.0),
+    };
+    all_objects.push(make_object(
+        &mut all_polygons,
+        &mesh,
+        light_material,
+        object_to_world_matrix,
+    ));
 
     let box_path = Path::new("resources/box.obj");
     let box_mesh: Obj<obj::SimplePolygon> = Obj::load(box_path).expect("Failed to load mesh");
-    let box_polygons = convert_objects_to_polygons(&box_mesh, 1, Matrix44::identity());
+    let box_material = Material::Diffuse {
+        color: Color {
+            red: 0.75,
+            green: 0.75,
+            blue: 0.75,
+        },
+        albedo: 0.36,
+    };
+    all_objects.push(make_object(
+        &mut all_polygons,
+        &box_mesh,
+        box_material,
+        Matrix44::identity(),
+    ));
 
     let load_time = load_start.elapsed();
     println!("Load/Convert Time: {:0.6}ms", to_millis(load_time));
@@ -385,41 +436,16 @@ fn main() {
     let fov = 90.0f32;
     let fov_adjustment = (fov.to_radians() / 2.0).tan();
     let material_count = 5;
-    let mut materials_device: UVec<Material> = UVec::new(material_count).unwrap();
-    materials_device[0] = Material::Refractive { index: 1.5 };
-    materials_device[1] = Material::Diffuse {
-        color: Color {
-            red: 0.75,
-            green: 0.75,
-            blue: 0.75,
-        },
-        albedo: 0.36,
-    };
-    materials_device[2] = Material::Emissive {
-        emission: WHITE.mul_s(2.0),
-    };
-    materials_device[3] = Material::Reflective;
-    materials_device[4] = Material::Diffuse {
-        color: Color {
-            red: 0.0,
-            green: 1.0,
-            blue: 0.0,
-        },
-        albedo: 0.36,
-    };
-    let polygon_count = teapot_1_polygons.len() + teapot_2_polygons.len() + teapot_3_polygons.len()
-        + light_polygons.len() + box_polygons.len();
-    println!("{} polygons in scene", polygon_count);
-    let mut polygons_device: UVec<Polygon> = UVec::new(polygon_count).unwrap();
-    for (i, poly) in teapot_1_polygons
-        .into_iter()
-        .chain(teapot_2_polygons.into_iter())
-        .chain(teapot_3_polygons.into_iter())
-        .chain(light_polygons.into_iter())
-        .chain(box_polygons.into_iter())
-        .enumerate()
-    {
+    println!("{} polygons in scene", all_polygons.len());
+
+    let mut polygons_device: UVec<Polygon> = UVec::new(all_polygons.len()).unwrap();
+    for (i, poly) in all_polygons.into_iter().enumerate() {
         polygons_device[i] = poly;
+    }
+
+    let mut objects_device: UVec<Object> = UVec::new(all_objects.len()).unwrap();
+    for (i, obj) in all_objects.into_iter().enumerate() {
+        objects_device[i] = obj;
     }
 
     trace_gpu(
@@ -427,6 +453,6 @@ fn main() {
         width,
         fov_adjustment,
         polygons_device,
-        materials_device,
+        objects_device,
     );
 }

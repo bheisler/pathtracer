@@ -3,7 +3,7 @@
 extern crate common;
 
 use common::math::*;
-use common::{Color, Material, Polygon, Ray, ScratchSpace, Vector3, BLACK, WHITE};
+use common::{Color, Material, Object, Polygon, Ray, ScratchSpace, Vector3, BLACK, WHITE};
 
 const BOUNCE_CAP: u32 = 4;
 const FLOATING_POINT_BACKOFF: f32 = 0.01;
@@ -31,9 +31,8 @@ pub unsafe fn trace_inner(
     fov_adjustment: f32,
     image: *mut Color,
     polygons: *const Polygon,
-    polygon_count: usize,
-    materials: *const Material,
-    _material_count: usize,
+    objects: *const Object,
+    object_count: usize,
     scratch_space: &mut ScratchSpace,
 ) {
     let mut stats = Stats {
@@ -45,7 +44,7 @@ pub unsafe fn trace_inner(
     if x < width && y < height {
         let mut random_seed: u32 = RANDOM_SEED
             ^ ((x << 16)
-                .wrapping_add((polygon_count as u32) << 12)
+                .wrapping_add(((*objects.offset(object_count as isize)).polygon_end as u32) << 12)
                 .wrapping_add(width << 23)
                 .wrapping_add(height << 28)
                 .wrapping_add(round << 5)
@@ -67,9 +66,9 @@ pub unsafe fn trace_inner(
                     width,
                     height,
                     fov_adjustment,
-                    materials,
                     polygons,
-                    polygon_count,
+                    objects,
+                    object_count,
                     &mut random_seed,
                     scratch_space,
                     &mut stats,
@@ -90,9 +89,9 @@ unsafe fn get_radiance(
     width: u32,
     height: u32,
     fov_adjustment: f32,
-    materials: *const Material,
     polygons: *const Polygon,
-    polygon_count: usize,
+    objects: *const Object,
+    object_count: usize,
     random_seed: &mut u32,
     scratch_space: &mut ScratchSpace,
     stats: &mut Stats,
@@ -117,19 +116,16 @@ unsafe fn get_radiance(
             let mut current_ray = scratch_space.rays.get_unchecked(ray_u).clone();
             let mut color_mask = scratch_space.masks.get_unchecked(ray_u).clone();
 
-            if let Some((distance, hit_poly, hit_normal)) =
-                intersect_scene(&current_ray, polygon_count, polygons, stats)
+            if let Some((distance, hit_object, hit_normal)) =
+                intersect_scene(&current_ray, polygons, objects, object_count, stats)
             {
-                let closest_polygon: &Polygon = &*polygons.offset(hit_poly);
-
                 let hit_point = current_ray
                     .origin
                     .add(current_ray.direction.mul_s(distance));
                 // Back off along the hit normal a bit to avoid floating-point problems.
                 current_ray.origin = hit_point.add(hit_normal.mul_s(FLOATING_POINT_BACKOFF));
 
-                let material_idx = closest_polygon.material_idx as isize;
-                let material = &*materials.offset(material_idx);
+                let material: Material = (&*objects.offset(hit_object)).material.clone();
 
                 match material {
                     Material::Diffuse { color, albedo } => {
@@ -150,7 +146,7 @@ unsafe fn get_radiance(
                         current_ray.direction = make_reflection(current_ray.direction, hit_normal);
                     }
                     Material::Refractive { index } => {
-                        let kr = fresnel(current_ray.direction, hit_normal, *index);
+                        let kr = fresnel(current_ray.direction, hit_normal, index);
 
                         if kr < 1.0 {
                             // Add the transmission ray
@@ -160,7 +156,7 @@ unsafe fn get_radiance(
                                     direction: make_transmission(
                                         current_ray.direction,
                                         hit_normal,
-                                        *index,
+                                        index,
                                     ),
                                     origin: current_ray.origin,
                                 };
@@ -297,32 +293,42 @@ fn create_coordinate_system(normal: &Vector3) -> (Vector3, Vector3) {
 
 unsafe fn intersect_scene(
     ray: &Ray,
-    polygon_count: usize,
     polygons: *const Polygon,
+    objects: *const Object,
+    object_count: usize,
     stats: &mut Stats,
 ) -> Option<(f32, isize, Vector3)> {
     stats.rays_traced += 1;
-    let mut polygon_i = 0;
+
     let mut closest_distance = 10000000.0;
-    let mut closest_i: isize = -1;
+    let mut closest_obj_i: isize = -1;
     let mut closest_normal = Vector3::zero();
-    while polygon_i < polygon_count {
-        stats.triangle_intersections += 1;
-        let polygon: &Polygon = &*polygons.offset(polygon_i as isize);
-        let maybe_hit = intersection_test(polygon, ray);
 
-        if let Some((distance, normal)) = maybe_hit {
-            if distance < closest_distance {
-                closest_distance = distance;
-                closest_i = polygon_i as isize;
-                closest_normal = normal;
+    let mut object_i = 0;
+    while object_i < object_count {
+        let object = &*objects.offset(object_i as isize);
+        let mut polygon_i = object.polygon_start;
+        let polygon_end = object.polygon_end;
+        while polygon_i < polygon_end {
+            stats.triangle_intersections += 1;
+            let polygon: &Polygon = &*polygons.offset(polygon_i as isize);
+            let maybe_hit = intersection_test(polygon, ray);
+
+            if let Some((distance, normal)) = maybe_hit {
+                if distance < closest_distance {
+                    closest_distance = distance;
+                    closest_normal = normal;
+                    closest_obj_i = object_i as isize;
+                }
             }
-        }
 
-        polygon_i += 1;
+            polygon_i += 1;
+        }
+        object_i += 1;
     }
-    if closest_i != -1 {
-        Some((closest_distance, closest_i, closest_normal))
+
+    if closest_obj_i != -1 {
+        Some((closest_distance, closest_obj_i, closest_normal))
     } else {
         None
     }
