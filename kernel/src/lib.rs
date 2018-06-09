@@ -11,8 +11,8 @@ const FLOATING_POINT_BACKOFF: f32 = 0.01;
 // For each block of the image, we trace RAY_COUNT rays, and we trace over each block ROUND_COUNT times.
 // This makes it possible to take many more samples than we can fit into the 3-second window.
 // This has to be tuned based on the complexity of the scene.
-pub const ROUND_COUNT: u32 = 8;
-const RAY_COUNT: u32 = 16;
+pub const ROUND_COUNT: u32 = 1;
+const RAY_COUNT: u32 = 128;
 
 const RANDOM_SEED: u32 = 0x8802dfb5;
 
@@ -34,8 +34,18 @@ pub unsafe fn trace_inner(
     let i = (y * width + x) as isize;
     if x < width && y < height {
         let mut random_seed: u32 = RANDOM_SEED
-            ^ ((x << 16) + ((polygon_count as u32) << 12) + (width << 23) + (height << 28)
-                + (round << 5) + y);
+            ^ ((x << 16)
+                .wrapping_add((polygon_count as u32) << 12)
+                .wrapping_add(width << 23)
+                .wrapping_add(height << 28)
+                .wrapping_add(round << 5)
+                .wrapping_add(y));
+
+        let mut skip_i = 0;
+        while skip_i < 10 {
+            random_float(&mut random_seed);
+            skip_i += 1;
+        }
 
         let mut color_accumulator = *image.offset(i);
         let mut ray_num = 0;
@@ -123,11 +133,32 @@ unsafe fn get_radiance(
                         color_accumulator = color_accumulator.add(emission.mul(color_mask));
                         // Leave the color mask as-is, I guess?
                     }
-                    Material::Reflective {} => {
-                        // Leave the mask and accumulator, just generate a new reflected ray
-                        current_ray.direction = current_ray
-                            .direction
-                            .sub(hit_normal.mul_s(2.0 * current_ray.direction.dot(hit_normal)));
+                    Material::Reflective => {
+                        current_ray.direction = make_reflection(current_ray.direction, hit_normal);
+                    }
+                    Material::Refractive { index } => {
+                        let kr = fresnel(current_ray.direction, hit_normal, *index);
+
+                        if kr < 1.0 {
+                            // Add the transmission ray
+                            let new_ray = scratch_space.add_ray();
+                            if new_ray != 0 {
+                                *scratch_space.rays.get_unchecked_mut(new_ray) = Ray {
+                                    direction: make_transmission(
+                                        current_ray.direction,
+                                        hit_normal,
+                                        *index,
+                                    ),
+                                    origin: current_ray.origin,
+                                };
+                                *scratch_space.masks.get_unchecked_mut(new_ray) =
+                                    color_mask.mul_s(1.0 - kr).mul_s(2.0);
+                            }
+                        }
+
+                        // The current ray becomes the reflection ray
+                        current_ray.direction = make_reflection(current_ray.direction, hit_normal);
+                        color_mask = color_mask.mul_s(kr).mul_s(2.0);
                     }
                 }
             } else {
@@ -142,6 +173,55 @@ unsafe fn get_radiance(
         bounce_i += 1;
     }
     return color_accumulator;
+}
+
+fn make_reflection(incident: Vector3, normal: Vector3) -> Vector3 {
+    incident.sub(normal.mul_s(2.0 * incident.dot(normal)))
+}
+
+pub fn make_transmission(normal: Vector3, incident: Vector3, index: f32) -> Vector3 {
+    let mut ref_n = normal;
+    let mut eta_t = index;
+    let mut eta_i = 1.0;
+    let mut i_dot_n = incident.dot(normal);
+    if i_dot_n < 0.0 {
+        //Outside the surface
+        i_dot_n = -i_dot_n;
+    } else {
+        //Inside the surface; invert the normal and swap the indices of refraction
+        ref_n = normal.neg();
+        eta_i = eta_t;
+        eta_t = 1.0;
+    }
+
+    let eta = eta_i / eta_t;
+    let k = 1.0 - (eta * eta) * (1.0 - i_dot_n * i_dot_n);
+    incident
+        .add(ref_n.mul_s(i_dot_n))
+        .mul_s(eta)
+        .sub(ref_n.mul_s(sqrt(k)))
+}
+
+fn fresnel(incident: Vector3, normal: Vector3, index: f32) -> f32 {
+    let i_dot_n = incident.dot(normal);
+    let mut eta_i = 1.0;
+    let mut eta_t = index as f32;
+    if i_dot_n > 0.0 {
+        eta_i = eta_t;
+        eta_t = 1.0;
+    }
+
+    let sin_t = eta_i / eta_t * sqrt(max(1.0 - i_dot_n * i_dot_n, 0.0));
+    if sin_t > 1.0 {
+        //Total internal reflection
+        return 1.0;
+    } else {
+        let cos_t = sqrt(max(1.0 - sin_t * sin_t, 0.0));
+        let cos_i = fabs(cos_t);
+        let r_s = ((eta_t * cos_i) - (eta_i * cos_t)) / ((eta_t * cos_i) + (eta_i * cos_t));
+        let r_p = ((eta_i * cos_i) - (eta_t * cos_t)) / ((eta_i * cos_i) + (eta_t * cos_t));
+        return (r_s * r_s + r_p * r_p) / 2.0;
+    }
 }
 
 /// Generates a random floating-point number in the range [0.0, 1.0] using an xorshift32 pRNG and

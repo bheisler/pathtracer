@@ -10,7 +10,7 @@ extern crate obj;
 
 use accel::*;
 use accel_derive::kernel;
-use common::{Color, Material, Polygon, ScratchSpace, Vector3, WHITE};
+use common::{Color, Material, Polygon, Ray, ScratchSpace, Vector3, BLACK, WHITE};
 use image::ImageBuffer;
 use kernel::ROUND_COUNT;
 use obj::Obj;
@@ -39,12 +39,11 @@ pub unsafe fn trace(
     materials: *const common::Material,
     material_count: usize,
     scratch_space: *mut common::ScratchSpace,
-    scratch_space_count: usize,
 ) {
     use accel_core::*;
 
-    let thread_x = (nvptx_block_idx_x() * nvptx_block_dim_x() + nvptx_thread_idx_x());
-    let thread_y = (nvptx_block_idx_y() * nvptx_block_dim_y() + nvptx_thread_idx_y());
+    let thread_x = nvptx_block_idx_x() * nvptx_block_dim_x() + nvptx_thread_idx_x();
+    let thread_y = nvptx_block_idx_y() * nvptx_block_dim_y() + nvptx_thread_idx_y();
 
     let x = base_x + thread_x as u32;
     let y = base_y + thread_y as u32;
@@ -180,76 +179,15 @@ fn bounding_box(polygons: &[Polygon]) {
     println!("z: {} - {}", min_z, max_z);
 }
 
-fn main() {
+fn trace_gpu(
+    height: u32,
+    width: u32,
+    fov_adjustment: f32,
+    polygons: UVec<Polygon>,
+    materials: UVec<Material>,
+) {
     use color_ext::ColorExt;
-
-    let load_start = Instant::now();
-
-    let mesh_path = Path::new("resources/utah-teapot.obj");
-    let mesh: Obj<obj::SimplePolygon> = Obj::load(mesh_path).expect("Failed to load mesh");
-    let object_to_world_matrix = Matrix44::translate(0.0, -3.0 - -1.575, -5.0)
-        * Matrix44::scale_linear(1.0)
-        * Matrix44::translate(0.0, -(3.15 / 2.0), 0.0);
-    let teapot_1_polygons = convert_objects_to_polygons(&mesh, 0, object_to_world_matrix);
-
-    let object_to_world_matrix = Matrix44::translate(-4.0, -3.0 - -1.575, -6.0)
-        * Matrix44::scale_linear(0.6)
-        * Matrix44::translate(0.0, -(3.15 / 2.0), 0.0);
-    let teapot_2_polygons = convert_objects_to_polygons(&mesh, 3, object_to_world_matrix);
-
-    let mesh_path = Path::new("resources/box2.obj");
-    let mesh: Obj<obj::SimplePolygon> = Obj::load(mesh_path).expect("Failed to load mesh");
-    let object_to_world_matrix = Matrix44::translate(0.0, 7.0, -5.0) * Matrix44::scale_linear(0.25)
-        * Matrix44::translate(0.0, -(3.15 / 2.0), 0.0);
-    let light_polygons = convert_objects_to_polygons(&mesh, 2, object_to_world_matrix);
-
-    let box_path = Path::new("resources/box.obj");
-    let box_mesh: Obj<obj::SimplePolygon> = Obj::load(box_path).expect("Failed to load mesh");
-    let box_polygons = convert_objects_to_polygons(&box_mesh, 1, Matrix44::identity());
-
-    let load_time = load_start.elapsed();
-    println!("Load/Convert Time: {:0.6}ms", to_millis(load_time));
-
-    let width = 1024u32 / 4;
-    let height = 736u32 / 4;
-    let fov = 90.0f32;
-    let fov_adjustment = (fov.to_radians() / 2.0).tan();
     let mut image_device: UVec<Color> = UVec::new((width * height) as usize).unwrap();
-    let material_count = 4;
-    let mut materials_device: UVec<Material> = UVec::new(material_count).unwrap();
-    materials_device[0] = Material::Diffuse {
-        color: Color {
-            red: 0.0,
-            green: 1.0,
-            blue: 0.0,
-        },
-        albedo: 0.36,
-    };
-    materials_device[1] = Material::Diffuse {
-        color: Color {
-            red: 0.75,
-            green: 0.75,
-            blue: 0.75,
-        },
-        albedo: 0.36,
-    };
-    materials_device[2] = Material::Emissive {
-        emission: WHITE.mul_s(2.0),
-    };
-    materials_device[3] = Material::Reflective {};
-    let polygon_count = teapot_1_polygons.len() + teapot_2_polygons.len() + light_polygons.len()
-        + box_polygons.len();
-    println!("{} polygons in scene", polygon_count);
-    let mut polygons_device: UVec<Polygon> = UVec::new(polygon_count).unwrap();
-    for (i, poly) in teapot_1_polygons
-        .into_iter()
-        .chain(teapot_2_polygons.into_iter())
-        .chain(light_polygons.into_iter())
-        .chain(box_polygons.into_iter())
-        .enumerate()
-    {
-        polygons_device[i] = poly;
-    }
 
     let chunk_size_x = 128;
     let chunk_size_y = 64;
@@ -280,12 +218,11 @@ fn main() {
                     round,
                     fov_adjustment,
                     image_device.as_mut_ptr(),
-                    polygons_device.as_ptr(),
-                    polygon_count,
-                    materials_device.as_ptr(),
-                    material_count,
+                    polygons.as_ptr(),
+                    polygons.len(),
+                    materials.as_ptr(),
+                    materials.len(),
                     scratch_space.as_mut_ptr(),
-                    thread_count,
                 );
                 let err = device::sync();
                 match err {
@@ -316,4 +253,161 @@ fn main() {
     println!("Transfer time: {:0.6}ms", to_millis(transfer_time));
 
     image_host.save("image_out.png").unwrap();
+}
+
+fn trace_cpu(
+    height: u32,
+    width: u32,
+    fov_adjustment: f32,
+    polygons: UVec<Polygon>,
+    materials: UVec<Material>,
+) {
+    use color_ext::ColorExt;
+    let mut image_device: UVec<Color> = UVec::new((width * height) as usize).unwrap();
+
+    let zero_ray = Ray {
+        direction: Vector3::zero(),
+        origin: Vector3::zero(),
+    };
+
+    let mut scratch_space = ScratchSpace {
+        rays: [
+            zero_ray.clone(),
+            zero_ray.clone(),
+            zero_ray.clone(),
+            zero_ray.clone(),
+            zero_ray.clone(),
+            zero_ray.clone(),
+            zero_ray.clone(),
+            zero_ray.clone(),
+        ],
+        masks: [BLACK; 8],
+        num_rays: 0,
+    };
+
+    let trace_start = Instant::now();
+
+    for y in 0..height {
+        for x in 0..width {
+            for round in 0..ROUND_COUNT {
+                unsafe {
+                    kernel::trace_inner(
+                        x,
+                        y,
+                        width,
+                        height,
+                        round,
+                        fov_adjustment,
+                        image_device.as_mut_ptr(),
+                        polygons.as_ptr(),
+                        polygons.len(),
+                        materials.as_ptr(),
+                        materials.len(),
+                        &mut scratch_space,
+                    );
+                }
+            }
+        }
+    }
+
+    let trace_time = trace_start.elapsed();
+    println!("Trace time: {:0.6}ms", to_millis(trace_time));
+
+    let transfer_start = Instant::now();
+    let mut image_host = ImageBuffer::new(width, height);
+    for y in 0..height {
+        let line_start = y * width;
+        for x in 0..width {
+            let color = &image_device[(line_start + x) as usize];
+            image_host.put_pixel(x, y, color.clamp().to_rgba());
+        }
+    }
+    let transfer_time = transfer_start.elapsed();
+    println!("Transfer time: {:0.6}ms", to_millis(transfer_time));
+
+    image_host.save("image_out.png").unwrap();
+}
+
+fn main() {
+    let load_start = Instant::now();
+
+    let mesh_path = Path::new("resources/utah-teapot.obj");
+    let mesh: Obj<obj::SimplePolygon> = Obj::load(mesh_path).expect("Failed to load mesh");
+    let object_to_world_matrix = Matrix44::translate(0.0, -3.0 - -1.575, -5.0)
+        * Matrix44::scale_linear(1.0)
+        * Matrix44::translate(0.0, -(3.15 / 2.0), 0.0);
+    let teapot_1_polygons = convert_objects_to_polygons(&mesh, 4, object_to_world_matrix);
+
+    let object_to_world_matrix = Matrix44::translate(-4.0, -3.0 - -1.575, -6.0)
+        * Matrix44::scale_linear(0.6)
+        * Matrix44::translate(0.0, -(3.15 / 2.0), 0.0);
+    let teapot_2_polygons = convert_objects_to_polygons(&mesh, 3, object_to_world_matrix);
+
+    let object_to_world_matrix = Matrix44::translate(4.0, -3.0 - -1.575, -6.0)
+        * Matrix44::scale_linear(0.6)
+        * Matrix44::translate(0.0, -(3.15 / 2.0), 0.0);
+    let teapot_3_polygons = convert_objects_to_polygons(&mesh, 4, object_to_world_matrix);
+
+    let mesh_path = Path::new("resources/box2.obj");
+    let mesh: Obj<obj::SimplePolygon> = Obj::load(mesh_path).expect("Failed to load mesh");
+    let object_to_world_matrix = Matrix44::translate(0.0, 7.0, -5.0) * Matrix44::scale_linear(0.25)
+        * Matrix44::translate(0.0, -(3.15 / 2.0), 0.0);
+    let light_polygons = convert_objects_to_polygons(&mesh, 2, object_to_world_matrix);
+
+    let box_path = Path::new("resources/box.obj");
+    let box_mesh: Obj<obj::SimplePolygon> = Obj::load(box_path).expect("Failed to load mesh");
+    let box_polygons = convert_objects_to_polygons(&box_mesh, 1, Matrix44::identity());
+
+    let load_time = load_start.elapsed();
+    println!("Load/Convert Time: {:0.6}ms", to_millis(load_time));
+
+    let width = 1024u32 / 4;
+    let height = 736u32 / 4;
+    let fov = 90.0f32;
+    let fov_adjustment = (fov.to_radians() / 2.0).tan();
+    let material_count = 5;
+    let mut materials_device: UVec<Material> = UVec::new(material_count).unwrap();
+    materials_device[0] = Material::Refractive { index: 1.5 };
+    materials_device[1] = Material::Diffuse {
+        color: Color {
+            red: 0.75,
+            green: 0.75,
+            blue: 0.75,
+        },
+        albedo: 0.36,
+    };
+    materials_device[2] = Material::Emissive {
+        emission: WHITE.mul_s(2.0),
+    };
+    materials_device[3] = Material::Reflective;
+    materials_device[4] = Material::Diffuse {
+        color: Color {
+            red: 0.0,
+            green: 1.0,
+            blue: 0.0,
+        },
+        albedo: 0.36,
+    };
+    let polygon_count = teapot_1_polygons.len() //+ teapot_2_polygons.len() + teapot_3_polygons.len()
+        + light_polygons.len() + box_polygons.len();
+    println!("{} polygons in scene", polygon_count);
+    let mut polygons_device: UVec<Polygon> = UVec::new(polygon_count).unwrap();
+    for (i, poly) in teapot_1_polygons
+        .into_iter()
+        //.chain(teapot_2_polygons.into_iter())
+        //.chain(teapot_3_polygons.into_iter())
+        .chain(light_polygons.into_iter())
+        .chain(box_polygons.into_iter())
+        .enumerate()
+    {
+        polygons_device[i] = poly;
+    }
+
+    trace_gpu(
+        height,
+        width,
+        fov_adjustment,
+        polygons_device,
+        materials_device,
+    );
 }

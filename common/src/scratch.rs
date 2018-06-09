@@ -8,3 +8,14 @@ pub struct ScratchSpace {
     pub masks: [Color; NUM_RAYS],
     pub num_rays: i32,
 }
+impl ScratchSpace {
+    #[inline]
+    pub fn add_ray(&mut self) -> usize {
+        if self.num_rays <= (NUM_RAYS - 1) as i32 {
+            self.num_rays += 1;
+            self.num_rays as usize
+        } else {
+            0
+        }
+    }
+}
