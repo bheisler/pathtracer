@@ -314,60 +314,30 @@ unsafe fn intersect_scene(
 const EPSILON: f32 = 0.00001;
 
 fn intersection_test(polygon: &Polygon, ray: &Ray) -> Option<(f32, Vector3)> {
-    // Step 1: Find P (intersection between triangle plane and ray)
-
-    let n = polygon.vertices[2]
-        .sub(polygon.vertices[0])
-        .cross(polygon.vertices[1].sub(polygon.vertices[0]))
-        .normalize();
-
-    let n_dot_r = n.dot(ray.direction);
-    if fabs(n_dot_r) < EPSILON {
-        // The ray is parallel to the triangle. No intersection.
+    let v0 = polygon.vertices[0];
+    let edge1 = polygon.vertices[1].sub(v0);
+    let edge2 = polygon.vertices[2].sub(v0);
+    let h = ray.direction.cross(edge2);
+    let a = edge1.dot(h);
+    if fabs(a) < EPSILON {
         return None;
     }
-
-    // Compute -D
-    let neg_d = n.dot(polygon.vertices[0]);
-
-    // Compute T
-    let t = (neg_d - ray.origin.dot(n)) / n_dot_r;
-    if t < 0.0 {
-        // Triangle is behind the origin of the ray. No intersection.
+    let f = 1.0 / a;
+    let s = ray.origin.sub(v0);
+    let u = f * (s.dot(h));
+    if (u < 0.0 || u > 1.0) {
         return None;
     }
-
-    // Calculate P
-    let p = ray.origin.add(ray.direction.mul_s(t));
-
-    // Step 2: is P in the triangle?
-
-    // Is P left of the first edge?
-    let edge = polygon.vertices[1].sub(polygon.vertices[0]);
-    let vp = p.sub(polygon.vertices[0]);
-    let c = edge.cross(vp);
-    if n.dot(c) < 0.0 {
-        return None;
-    } // P is right of the edge. No intersection.
-
-    // Repeat for edges 2 and 3
-
-    let edge = polygon.vertices[2].sub(polygon.vertices[1]);
-    let vp = p.sub(polygon.vertices[1]);
-    let c = edge.cross(vp);
-    if n.dot(c) < 0.0 {
+    let q = s.cross(edge1);
+    let v = f * ray.direction.dot(q);
+    if (v < 0.0 || u + v > 1.0) {
         return None;
     }
-
-    let edge = polygon.vertices[0].sub(polygon.vertices[2]);
-    let vp = p.sub(polygon.vertices[2]);
-    let c = edge.cross(vp);
-    if n.dot(c) < 0.0 {
-        return None;
+    let t = f * edge2.dot(q);
+    if (t > EPSILON) {
+        return Some((t, edge1.cross(edge2).normalize()));
     }
-
-    // Finally, we've confirmed an intersection.
-    Some((t, n))
+    return None;
 }
 
 #[cfg(test)]
