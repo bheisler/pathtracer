@@ -95,14 +95,8 @@ fn convert_objects_to_polygons(
         let vertex2 = make_vector(&obj.position[index2]);
         let vertex3 = make_vector(&obj.position[index3]);
 
-        let a = vertex2.sub(vertex1);
-        let b = vertex3.sub(vertex1);
-
-        let normal = a.cross(b).normalize();
-
         Polygon {
             vertices: [vertex1, vertex2, vertex3],
-            normal,
             material_idx,
         }
     };

@@ -103,12 +103,11 @@ unsafe fn get_radiance(
             let mut current_ray = scratch_space.rays.get_unchecked(ray_u).clone();
             let mut color_mask = scratch_space.masks.get_unchecked(ray_u).clone();
 
-            if let Some((distance, hit_poly)) =
+            if let Some((distance, hit_poly, hit_normal)) =
                 intersect_scene(&current_ray, polygon_count, polygons)
             {
                 let closest_polygon: &Polygon = &*polygons.offset(hit_poly);
 
-                let hit_normal = closest_polygon.normal;
                 let hit_point = current_ray
                     .origin
                     .add(current_ray.direction.mul_s(distance));
@@ -286,25 +285,27 @@ unsafe fn intersect_scene(
     ray: &Ray,
     polygon_count: usize,
     polygons: *const Polygon,
-) -> Option<(f32, isize)> {
+) -> Option<(f32, isize, Vector3)> {
     let mut polygon_i = 0;
     let mut closest_distance = 10000000.0;
     let mut closest_i: isize = -1;
+    let mut closest_normal = Vector3::zero();
     while polygon_i < polygon_count {
         let polygon: &Polygon = &*polygons.offset(polygon_i as isize);
         let maybe_hit = intersection_test(polygon, ray);
 
-        if let Some(distance) = maybe_hit {
+        if let Some((distance, normal)) = maybe_hit {
             if distance < closest_distance {
                 closest_distance = distance;
                 closest_i = polygon_i as isize;
+                closest_normal = normal;
             }
         }
 
         polygon_i += 1;
     }
     if closest_i != -1 {
-        Some((closest_distance, closest_i))
+        Some((closest_distance, closest_i, closest_normal))
     } else {
         None
     }
@@ -312,10 +313,13 @@ unsafe fn intersect_scene(
 
 const EPSILON: f32 = 0.00001;
 
-fn intersection_test(polygon: &Polygon, ray: &Ray) -> Option<f32> {
+fn intersection_test(polygon: &Polygon, ray: &Ray) -> Option<(f32, Vector3)> {
     // Step 1: Find P (intersection between triangle plane and ray)
 
-    let n = polygon.normal;
+    let n = polygon.vertices[2]
+        .sub(polygon.vertices[0])
+        .cross(polygon.vertices[1].sub(polygon.vertices[0]))
+        .normalize();
 
     let n_dot_r = n.dot(ray.direction);
     if fabs(n_dot_r) < EPSILON {
@@ -363,7 +367,7 @@ fn intersection_test(polygon: &Polygon, ray: &Ray) -> Option<f32> {
     }
 
     // Finally, we've confirmed an intersection.
-    Some(t)
+    Some((t, n))
 }
 
 #[cfg(test)]
