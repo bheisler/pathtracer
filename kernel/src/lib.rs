@@ -16,6 +16,11 @@ const RAY_COUNT: u32 = 128;
 
 const RANDOM_SEED: u32 = 0x8802dfb5;
 
+struct Stats {
+    rays_traced: u64,
+    triangle_intersections: u64,
+}
+
 #[no_mangle]
 pub unsafe fn trace_inner(
     x: u32,
@@ -31,6 +36,11 @@ pub unsafe fn trace_inner(
     _material_count: usize,
     scratch_space: &mut ScratchSpace,
 ) {
+    let mut stats = Stats {
+        rays_traced: 0,
+        triangle_intersections: 0,
+    };
+
     let i = (y * width + x) as isize;
     if x < width && y < height {
         let mut random_seed: u32 = RANDOM_SEED
@@ -62,12 +72,15 @@ pub unsafe fn trace_inner(
                     polygon_count,
                     &mut random_seed,
                     scratch_space,
+                    &mut stats,
                 ).mul_s(1.0 / (RAY_COUNT * ROUND_COUNT) as f32),
             );
             ray_num += 1;
         }
 
         *image.offset(i) = color_accumulator;
+        scratch_space.rays_traced += stats.rays_traced;
+        scratch_space.triangle_intersections += stats.triangle_intersections;
     }
 }
 
@@ -82,6 +95,7 @@ unsafe fn get_radiance(
     polygon_count: usize,
     random_seed: &mut u32,
     scratch_space: &mut ScratchSpace,
+    stats: &mut Stats,
 ) -> Color {
     let mut color_accumulator = BLACK;
 
@@ -104,7 +118,7 @@ unsafe fn get_radiance(
             let mut color_mask = scratch_space.masks.get_unchecked(ray_u).clone();
 
             if let Some((distance, hit_poly, hit_normal)) =
-                intersect_scene(&current_ray, polygon_count, polygons)
+                intersect_scene(&current_ray, polygon_count, polygons, stats)
             {
                 let closest_polygon: &Polygon = &*polygons.offset(hit_poly);
 
@@ -285,12 +299,15 @@ unsafe fn intersect_scene(
     ray: &Ray,
     polygon_count: usize,
     polygons: *const Polygon,
+    stats: &mut Stats,
 ) -> Option<(f32, isize, Vector3)> {
+    stats.rays_traced += 1;
     let mut polygon_i = 0;
     let mut closest_distance = 10000000.0;
     let mut closest_i: isize = -1;
     let mut closest_normal = Vector3::zero();
     while polygon_i < polygon_count {
+        stats.triangle_intersections += 1;
         let polygon: &Polygon = &*polygons.offset(polygon_i as isize);
         let maybe_hit = intersection_test(polygon, ray);
 
@@ -325,16 +342,16 @@ fn intersection_test(polygon: &Polygon, ray: &Ray) -> Option<(f32, Vector3)> {
     let f = 1.0 / a;
     let s = ray.origin.sub(v0);
     let u = f * (s.dot(h));
-    if (u < 0.0 || u > 1.0) {
+    if u < 0.0 || u > 1.0 {
         return None;
     }
     let q = s.cross(edge1);
     let v = f * ray.direction.dot(q);
-    if (v < 0.0 || u + v > 1.0) {
+    if v < 0.0 || u + v > 1.0 {
         return None;
     }
     let t = f * edge2.dot(q);
-    if (t > EPSILON) {
+    if t > EPSILON {
         return Some((t, edge1.cross(edge2).normalize()));
     }
     return None;

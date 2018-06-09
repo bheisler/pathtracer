@@ -188,6 +188,10 @@ fn trace_gpu(
     let thread_count = (chunk_size_x * chunk_size_y) as usize;
 
     let mut scratch_space: UVec<ScratchSpace> = UVec::new(thread_count).unwrap();
+    for i in 0..thread_count {
+        scratch_space[i].rays_traced = 0;
+        scratch_space[i].triangle_intersections = 0;
+    }
 
     let block = Block::xy(32, 16);
     let grid = Grid::xy(chunk_size_x / block.x, chunk_size_y / block.y);
@@ -227,12 +231,31 @@ fn trace_gpu(
                 println!("Round time: {:0.6}ms", to_millis(round_time));
             }
             let block_time = block_start.elapsed();
-            println!("Block time: {:0.6}ms", to_millis(block_time));
+            if ROUND_COUNT > 1 {
+                println!("Block time: {:0.6}ms", to_millis(block_time));
+            }
         }
     }
 
     let trace_time = trace_start.elapsed();
+
+    println!("{} polygons in scene", polygons.as_slice().len());
     println!("Trace time: {:0.6}ms", to_millis(trace_time));
+
+    let mut rays_traced = 0u64;
+    let mut triangle_intersections = 0u64;
+    for i in 0..thread_count {
+        // Some of the scratch-spaces are trashed for reasons unknown. Just ignore those.
+        if scratch_space[i].rays_traced < 1_000_000 {
+            rays_traced += scratch_space[i].rays_traced;
+            triangle_intersections += scratch_space[i].triangle_intersections;
+        }
+    }
+    println!("Traced {} rays", rays_traced);
+    println!(
+        "Performed {} triangle intersections",
+        triangle_intersections
+    );
 
     let transfer_start = Instant::now();
     let mut image_host = ImageBuffer::new(width, height);
@@ -277,6 +300,8 @@ fn trace_cpu(
         ],
         masks: [BLACK; 8],
         num_rays: 0,
+        rays_traced: 0,
+        triangle_intersections: 0,
     };
 
     let trace_start = Instant::now();
@@ -330,7 +355,7 @@ fn main() {
     let object_to_world_matrix = Matrix44::translate(0.0, -3.0 - -1.575, -5.0)
         * Matrix44::scale_linear(1.0)
         * Matrix44::translate(0.0, -(3.15 / 2.0), 0.0);
-    let teapot_1_polygons = convert_objects_to_polygons(&mesh, 4, object_to_world_matrix);
+    let teapot_1_polygons = convert_objects_to_polygons(&mesh, 0, object_to_world_matrix);
 
     let object_to_world_matrix = Matrix44::translate(-4.0, -3.0 - -1.575, -6.0)
         * Matrix44::scale_linear(0.6)
@@ -382,14 +407,14 @@ fn main() {
         },
         albedo: 0.36,
     };
-    let polygon_count = teapot_1_polygons.len() //+ teapot_2_polygons.len() + teapot_3_polygons.len()
+    let polygon_count = teapot_1_polygons.len() + teapot_2_polygons.len() + teapot_3_polygons.len()
         + light_polygons.len() + box_polygons.len();
     println!("{} polygons in scene", polygon_count);
     let mut polygons_device: UVec<Polygon> = UVec::new(polygon_count).unwrap();
     for (i, poly) in teapot_1_polygons
         .into_iter()
-        //.chain(teapot_2_polygons.into_iter())
-        //.chain(teapot_3_polygons.into_iter())
+        .chain(teapot_2_polygons.into_iter())
+        .chain(teapot_3_polygons.into_iter())
         .chain(light_polygons.into_iter())
         .chain(box_polygons.into_iter())
         .enumerate()

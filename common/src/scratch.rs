@@ -7,6 +7,8 @@ pub struct ScratchSpace {
     pub rays: [Ray; NUM_RAYS],
     pub masks: [Color; NUM_RAYS],
     pub num_rays: i32,
+    pub rays_traced: u64,
+    pub triangle_intersections: u64,
 }
 impl ScratchSpace {
     #[inline]
