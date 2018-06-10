@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 mod color;
+mod grid;
 mod material;
 pub mod math;
 mod object;
@@ -11,6 +12,7 @@ mod scratch;
 mod vector;
 
 pub use color::{Color, BLACK, WHITE};
+pub use grid::{GridDevice, IndexRange};
 pub use material::Material;
 pub use object::{BoundingBox, Object};
 pub use polygon::Polygon;

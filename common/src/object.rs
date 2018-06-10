@@ -1,3 +1,4 @@
+use grid::GridDevice;
 use material::Material;
 
 pub struct BoundingBox {
@@ -14,4 +15,5 @@ pub struct Object {
     pub polygon_end: usize,
     pub material: Material,
     pub bounding_box: BoundingBox,
+    pub grid: GridDevice,
 }

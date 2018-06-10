@@ -8,14 +8,15 @@ use common::{
 };
 use core::mem::swap;
 
-const BOUNCE_CAP: u32 = 4;
+const BOUNCE_CAP: u32 = 8;
 const FLOATING_POINT_BACKOFF: f32 = 0.01;
+const LIGHT_POWER_FUDGE_FACTOR: f32 = 1.25;
 
 // For each block of the image, we trace RAY_COUNT rays, and we trace over each block ROUND_COUNT times.
 // This makes it possible to take many more samples than we can fit into the 3-second window.
 // This has to be tuned based on the complexity of the scene.
-pub const ROUND_COUNT: u32 = 1;
-const RAY_COUNT: u32 = 128;
+pub const ROUND_COUNT: u32 = 16;
+const RAY_COUNT: u32 = 256;
 
 const RANDOM_SEED: u32 = 0x8802dfb5;
 
@@ -141,7 +142,9 @@ unsafe fn get_radiance(
                         let reflected_power = albedo * ::core::f32::consts::PI;
                         let reflected_color = color.mul_s(cosine_angle).mul_s(reflected_power);
 
-                        color_mask = color_mask.mul(reflected_color).mul_s(2.0);
+                        color_mask = color_mask
+                            .mul(reflected_color)
+                            .mul_s(LIGHT_POWER_FUDGE_FACTOR);
                     }
                     Material::Emissive { emission } => {
                         current_ray.direction = create_scatter_direction(&hit_normal, random_seed);
@@ -156,24 +159,24 @@ unsafe fn get_radiance(
 
                         if kr < 1.0 {
                             // Add the transmission ray
-                            let new_ray = scratch_space.add_ray();
-                            if new_ray != 0 {
+                            if let Some(new_ray) = scratch_space.add_ray() {
                                 *scratch_space.rays.get_unchecked_mut(new_ray) = Ray {
                                     direction: make_transmission(
-                                        current_ray.direction,
                                         hit_normal,
+                                        current_ray.direction,
                                         index,
                                     ),
-                                    origin: current_ray.origin,
+                                    origin: hit_point
+                                        .add(hit_normal.mul_s(-FLOATING_POINT_BACKOFF)),
                                 };
                                 *scratch_space.masks.get_unchecked_mut(new_ray) =
-                                    color_mask.mul_s(1.0 - kr).mul_s(2.0);
+                                    color_mask.mul_s((1.0 - kr) * LIGHT_POWER_FUDGE_FACTOR);
                             }
                         }
 
                         // The current ray becomes the reflection ray
                         current_ray.direction = make_reflection(current_ray.direction, hit_normal);
-                        color_mask = color_mask.mul_s(kr).mul_s(2.0);
+                        color_mask = color_mask.mul_s(kr * LIGHT_POWER_FUDGE_FACTOR);
                     }
                 }
             } else {
@@ -314,23 +317,17 @@ unsafe fn intersect_scene(
     while object_i < object_count {
         let object = &*objects.offset(object_i as isize);
         stats.bounding_box_intersections += 1;
-        if test_bounding_box(&object.bounding_box, ray) {
-            let mut polygon_i = object.polygon_start;
-            let polygon_end = object.polygon_end;
-            while polygon_i < polygon_end {
-                stats.triangle_intersections += 1;
-                let polygon: &Polygon = &*polygons.offset(polygon_i as isize);
-                let maybe_hit = intersection_test(polygon, ray);
+        if let Some(t) = test_bounding_box(&object.bounding_box, ray) {
+            let hit_point = ray.origin
+                .add(ray.direction.mul_s(t + FLOATING_POINT_BACKOFF));
 
-                if let Some((distance, normal)) = maybe_hit {
-                    if distance < closest_distance {
-                        closest_distance = distance;
-                        closest_normal = normal;
-                        closest_obj_i = object_i as isize;
-                    }
+            if let Some((distance, normal)) = grid_march(&object, polygons, &hit_point, &ray, stats)
+            {
+                if distance < closest_distance {
+                    closest_distance = distance;
+                    closest_normal = normal;
+                    closest_obj_i = object_i as isize;
                 }
-
-                polygon_i += 1;
             }
         }
 
@@ -344,9 +341,99 @@ unsafe fn intersect_scene(
     }
 }
 
+unsafe fn grid_march(
+    object: &Object,
+    polygons: *const Polygon,
+    start: &Vector3,
+    ray: &Ray,
+    stats: &mut Stats,
+) -> Option<(f32, Vector3)> {
+    let start2 = Vector3 {
+        x: start.x - object.bounding_box.min_x,
+        y: start.y - object.bounding_box.min_y,
+        z: start.z - object.bounding_box.min_z,
+    };
+
+    let mut cur_x = floor(start2.x / object.grid.cell_x) as i32;
+    let mut cur_y = floor(start2.y / object.grid.cell_y) as i32;
+    let mut cur_z = floor(start2.z / object.grid.cell_z) as i32;
+
+    let step_x = if ray.direction.x > 0.0 { 1 } else { -1 };
+    let step_y = if ray.direction.y > 0.0 { 1 } else { -1 };
+    let step_z = if ray.direction.z > 0.0 { 1 } else { -1 };
+
+    fn voxel_side(k: i32, step_k: i32) -> f32 {
+        if step_k < 0 {
+            k as f32
+        } else {
+            (k + step_k) as f32
+        }
+    }
+
+    let mut t_max_x = (voxel_side(cur_x, step_x) * object.grid.cell_x - start2.x) / ray.direction.x;
+    let mut t_max_y = (voxel_side(cur_y, step_y) * object.grid.cell_y - start2.y) / ray.direction.y;
+    let mut t_max_z = (voxel_side(cur_z, step_z) * object.grid.cell_z - start2.z) / ray.direction.z;
+
+    let t_delta_x = (step_x as f32) * (object.grid.cell_x / ray.direction.x);
+    let t_delta_y = (step_y as f32) * (object.grid.cell_y / ray.direction.y);
+    let t_delta_z = (step_z as f32) * (object.grid.cell_z / ray.direction.z);
+
+    let mut closest_t = 10000000.0;
+    let mut closest_normal = Vector3::zero();
+    while cur_x >= 0 && cur_x < object.grid.n_x && cur_y >= 0 && cur_y < object.grid.n_y
+        && cur_z >= 0 && cur_z < object.grid.n_z
+    {
+        let i = (cur_z * object.grid.n_y * object.grid.n_x) + (cur_y * object.grid.n_x) + cur_x;
+        let mut index_i = (*object.grid.index_ranges.offset(i as isize)).start;
+        let index_stop = (*object.grid.index_ranges.offset(i as isize)).stop;
+
+        while index_i < index_stop {
+            let polygon_i = *object.grid.polygon_indexes.offset(index_i);
+            let polygon = &*polygons.offset(polygon_i);
+            stats.triangle_intersections += 1;
+            if let Some((distance, normal)) = intersection_test(polygon, ray) {
+                if distance < closest_t {
+                    closest_t = distance;
+                    closest_normal = normal;
+                }
+            }
+            index_i += 1;
+        }
+
+        let mut t_min = 0.0;
+        if t_max_x < t_max_y {
+            if t_max_x < t_max_z {
+                cur_x += step_x;
+                t_min = t_max_x;
+                t_max_x += t_delta_x;
+            } else {
+                cur_z += step_z;
+                t_min = t_max_z;
+                t_max_z += t_delta_z;
+            }
+        } else {
+            if t_max_y < t_max_z {
+                cur_y += step_y;
+                t_min = t_max_y;
+                t_max_y += t_delta_y;
+            } else {
+                cur_z += step_z;
+                t_min = t_max_z;
+                t_max_z += t_delta_z;
+            }
+        }
+    }
+
+    if closest_t != 10000000.0 {
+        Some((closest_t, closest_normal))
+    } else {
+        None
+    }
+}
+
 const EPSILON: f32 = 0.00001;
 
-fn test_bounding_box(bounding_box: &BoundingBox, ray: &Ray) -> bool {
+fn test_bounding_box(bounding_box: &BoundingBox, ray: &Ray) -> Option<f32> {
     let dir_inv = ray.direction.inverse();
 
     let mut tmin = (bounding_box.min_x - ray.origin.x) * dir_inv.x;
@@ -364,7 +451,7 @@ fn test_bounding_box(bounding_box: &BoundingBox, ray: &Ray) -> bool {
     }
 
     if tmin > tymax || tymin > tmax {
-        return false;
+        return None;
     }
 
     tmin = max(tmin, tymin);
@@ -378,9 +465,18 @@ fn test_bounding_box(bounding_box: &BoundingBox, ray: &Ray) -> bool {
     }
 
     if tmin > tzmax || tzmin > tmax {
-        return false;
+        return None;
     }
-    true
+
+    tmin = max(tmin, tzmin);
+    tmax = min(tzmax, tmax);
+
+    let t = if tmin < 0.0 { 0.0 } else { tmin };
+    if t < 0.0 {
+        return None;
+    }
+
+    Some(t)
 }
 
 fn intersection_test(polygon: &Polygon, ray: &Ray) -> Option<(f32, Vector3)> {

@@ -19,6 +19,7 @@ use obj::Obj;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+mod grid;
 mod matrix;
 
 use matrix::Matrix44;
@@ -70,6 +71,7 @@ pub unsafe fn trace(
 
 fn make_object(
     all_polygons: &mut Vec<Polygon>,
+    all_grids: &mut Vec<grid::Grid>,
     obj: &Obj<obj::SimplePolygon>,
     material: Material,
     object_to_world: Matrix44,
@@ -115,11 +117,20 @@ fn make_object(
 
     let polygon_end = all_polygons.len();
 
+    let polygon_slice = &all_polygons[polygon_start..polygon_end];
+
+    let bounding_box = make_bounding_box(polygon_slice);
+
+    let grid = grid::Grid::new(&bounding_box, polygon_slice, polygon_start);
+    let grid_device = grid.to_device();
+    all_grids.push(grid);
+
     Object {
         polygon_start,
         polygon_end,
         material,
-        bounding_box: bounding_box(&all_polygons[polygon_start..polygon_end]),
+        bounding_box,
+        grid: grid_device,
     }
 }
 
@@ -156,7 +167,7 @@ fn to_millis(duration: Duration) -> f32 {
     ((duration.as_secs() as f32) * 1000.0) + ((duration.subsec_nanos() as f32) / 1000000.0)
 }
 
-fn bounding_box(polygons: &[Polygon]) -> BoundingBox {
+fn make_bounding_box(polygons: &[Polygon]) -> BoundingBox {
     let mut bounding_box = BoundingBox {
         min_x: 100000.0,
         max_x: -100000.0,
@@ -199,9 +210,13 @@ fn trace_gpu(
 
     let trace_start = Instant::now();
 
-    for chunk_y in 0..=(height / chunk_size_y) {
+    let num_chunks_y = (height / chunk_size_y) + 1;
+    let num_chunks_x = (width / chunk_size_x) + 1;
+    let num_chunks = num_chunks_x * num_chunks_y;
+
+    for chunk_y in 0..num_chunks_y {
         let base_y = chunk_y * chunk_size_y;
-        for chunk_x in 0..=(width / chunk_size_x) {
+        for chunk_x in 0..num_chunks_x {
             let base_x = chunk_x * chunk_size_x;
             let block_start = Instant::now();
 
@@ -228,12 +243,22 @@ fn trace_gpu(
                     Ok(_) => {}
                 }
                 let round_time = round_start.elapsed();
-                println!("Round time: {:0.6}ms", to_millis(round_time));
+                if ROUND_COUNT > 1 {
+                    println!(
+                        "Round {}/{} time: {:0.6}ms",
+                        round,
+                        ROUND_COUNT,
+                        to_millis(round_time)
+                    );
+                }
             }
             let block_time = block_start.elapsed();
-            if ROUND_COUNT > 1 {
-                println!("Block time: {:0.6}ms", to_millis(block_time));
-            }
+            println!(
+                "Block time: {}/{} {:0.6}ms",
+                (chunk_y * num_chunks_y + chunk_x),
+                num_chunks,
+                to_millis(block_time)
+            );
         }
     }
 
@@ -246,12 +271,9 @@ fn trace_gpu(
     let mut triangle_intersections = 0u64;
     let mut bounding_box_intersections = 0u64;
     for i in 0..thread_count {
-        // Some of the scratch-spaces are trashed for reasons unknown. Just ignore those.
-        if scratch_space[i].rays_traced < 1_000_000 {
-            rays_traced += scratch_space[i].rays_traced;
-            triangle_intersections += scratch_space[i].triangle_intersections;
-            bounding_box_intersections += scratch_space[i].bounding_box_intersections;
-        }
+        rays_traced += scratch_space[i].rays_traced;
+        triangle_intersections += scratch_space[i].triangle_intersections;
+        bounding_box_intersections += scratch_space[i].bounding_box_intersections;
     }
     println!("Traced {} rays", rays_traced);
     println!(
@@ -303,8 +325,16 @@ fn trace_cpu(
             zero_ray.clone(),
             zero_ray.clone(),
             zero_ray.clone(),
+            zero_ray.clone(),
+            zero_ray.clone(),
+            zero_ray.clone(),
+            zero_ray.clone(),
+            zero_ray.clone(),
+            zero_ray.clone(),
+            zero_ray.clone(),
+            zero_ray.clone(),
         ],
-        masks: [BLACK; 8],
+        masks: [BLACK; 16],
         num_rays: 0,
         rays_traced: 0,
         triangle_intersections: 0,
@@ -358,6 +388,7 @@ fn main() {
 
     let mut all_polygons = vec![];
     let mut all_objects = vec![];
+    let mut all_grids = vec![];
 
     let mesh_path = Path::new("resources/utah-teapot.obj");
     let mesh: Obj<obj::SimplePolygon> = Obj::load(mesh_path).expect("Failed to load mesh");
@@ -367,6 +398,7 @@ fn main() {
     let teapot_1_material = Material::Refractive { index: 1.5 };
     all_objects.push(make_object(
         &mut all_polygons,
+        &mut all_grids,
         &mesh,
         teapot_1_material,
         object_to_world_matrix,
@@ -378,6 +410,7 @@ fn main() {
     let teapot_2_material = Material::Reflective;
     all_objects.push(make_object(
         &mut all_polygons,
+        &mut all_grids,
         &mesh,
         teapot_2_material,
         object_to_world_matrix,
@@ -396,6 +429,7 @@ fn main() {
     };
     all_objects.push(make_object(
         &mut all_polygons,
+        &mut all_grids,
         &mesh,
         teapot_3_material,
         object_to_world_matrix,
@@ -410,6 +444,7 @@ fn main() {
     };
     all_objects.push(make_object(
         &mut all_polygons,
+        &mut all_grids,
         &mesh,
         light_material,
         object_to_world_matrix,
@@ -427,6 +462,7 @@ fn main() {
     };
     all_objects.push(make_object(
         &mut all_polygons,
+        &mut all_grids,
         &box_mesh,
         box_material,
         Matrix44::identity(),
@@ -435,8 +471,8 @@ fn main() {
     let load_time = load_start.elapsed();
     println!("Load/Convert Time: {:0.6}ms", to_millis(load_time));
 
-    let width = 1024u32 / 4;
-    let height = 736u32 / 4;
+    let width = 1024u32;
+    let height = 736u32;
     let fov = 90.0f32;
     let fov_adjustment = (fov.to_radians() / 2.0).tan();
     println!("{} polygons in scene", all_polygons.len());

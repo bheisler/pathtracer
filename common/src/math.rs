@@ -76,3 +76,7 @@ pub fn max(a: f32, b: f32) -> f32 {
         a
     }
 }
+
+pub fn floor(f: f32) -> f32 {
+    unsafe { intrinsics::floorf32(f) }
+}
