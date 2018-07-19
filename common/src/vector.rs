@@ -110,20 +110,3 @@ pub struct Ray {
     pub origin: Vector3,
     pub direction: Vector3,
 }
-impl Ray {
-    #[inline]
-    pub fn create_prime(x: f32, y: f32, width: f32, height: f32, fov_adjustment: f32) -> Ray {
-        let aspect_ratio = width / height;
-        let sensor_x = ((((x + 0.5) / width) * 2.0 - 1.0) * aspect_ratio) * fov_adjustment;
-        let sensor_y = (1.0 - ((y + 0.5) / height) * 2.0) * fov_adjustment;
-
-        Ray {
-            origin: Vector3::zero(),
-            direction: Vector3 {
-                x: sensor_x,
-                y: sensor_y,
-                z: -1.0,
-            }.normalize(),
-        }
-    }
-}

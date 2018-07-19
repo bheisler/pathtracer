@@ -15,8 +15,8 @@ const LIGHT_POWER_FUDGE_FACTOR: f32 = 1.25;
 // For each block of the image, we trace RAY_COUNT rays, and we trace over each block ROUND_COUNT times.
 // This makes it possible to take many more samples than we can fit into the 3-second window.
 // This has to be tuned based on the complexity of the scene.
-pub const ROUND_COUNT: u32 = 16;
-const RAY_COUNT: u32 = 256;
+pub const ROUND_COUNT: u32 = 64;
+const RAY_COUNT: u32 = 32;
 
 const RANDOM_SEED: u32 = 0x8802dfb5;
 
@@ -106,12 +106,13 @@ unsafe fn get_radiance(
     let mut color_accumulator = BLACK;
 
     scratch_space.num_rays = 0;
-    scratch_space.rays[0] = Ray::create_prime(
+    scratch_space.rays[0] = create_prime_ray(
         x as f32,
         y as f32,
         width as f32,
         height as f32,
         fov_adjustment,
+        random_seed,
     );
     scratch_space.masks[0] = WHITE;
 
@@ -136,18 +137,24 @@ unsafe fn get_radiance(
 
                 match material {
                     Material::Diffuse { color, albedo } => {
-                        current_ray.direction = create_scatter_direction(&hit_normal, random_seed);
-                        // Lighting = emission + (incident_light * color * incident_direction dot normal * albedo * PI)
+                        let (direction, weight) =
+                            create_scatter_direction(&hit_normal, random_seed);
+                        current_ray.direction = direction;
+                        // Lighting = emission + (incident_light * color * incident_direction dot normal * albedo * PI * weight)
                         let cosine_angle = current_ray.direction.dot(hit_normal);
                         let reflected_power = albedo * ::core::f32::consts::PI;
-                        let reflected_color = color.mul_s(cosine_angle).mul_s(reflected_power);
+                        let reflected_color = color
+                            .mul_s(cosine_angle)
+                            .mul_s(reflected_power)
+                            .mul_s(weight);
 
                         color_mask = color_mask
                             .mul(reflected_color)
                             .mul_s(LIGHT_POWER_FUDGE_FACTOR);
                     }
                     Material::Emissive { emission } => {
-                        current_ray.direction = create_scatter_direction(&hit_normal, random_seed);
+                        let (direction, _) = create_scatter_direction(&hit_normal, random_seed);
+                        current_ray.direction = direction;
                         color_accumulator = color_accumulator.add(emission.mul(color_mask));
                         // Leave the color mask as-is, I guess?
                     }
@@ -191,6 +198,29 @@ unsafe fn get_radiance(
         bounce_i += 1;
     }
     return color_accumulator;
+}
+
+fn create_prime_ray(
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    fov_adjustment: f32,
+    seed: &mut u32,
+) -> Ray {
+    let aspect_ratio = width / height;
+    let sensor_x =
+        ((((x + random_float(seed)) / width) * 2.0 - 1.0) * aspect_ratio) * fov_adjustment;
+    let sensor_y = (1.0 - ((y + random_float(seed)) / height) * 2.0) * fov_adjustment;
+
+    Ray {
+        origin: Vector3::zero(),
+        direction: Vector3 {
+            x: sensor_x,
+            y: sensor_y,
+            z: -1.0,
+        }.normalize(),
+    }
 }
 
 fn make_reflection(incident: Vector3, normal: Vector3) -> Vector3 {
@@ -260,7 +290,7 @@ fn random_float(seed: &mut u32) -> f32 {
     return float - 1.0;
 }
 
-fn create_scatter_direction(normal: &Vector3, random_seed: &mut u32) -> Vector3 {
+fn create_scatter_direction(normal: &Vector3, random_seed: &mut u32) -> (Vector3, f32) {
     let r1 = random_float(random_seed);
     let r2 = random_float(random_seed);
 
@@ -274,11 +304,13 @@ fn create_scatter_direction(normal: &Vector3, random_seed: &mut u32) -> Vector3 
 
     let (n_t, n_b) = create_coordinate_system(normal);
 
-    Vector3 {
+    let scatter = Vector3 {
         x: hemisphere_vec.x * n_b.x + hemisphere_vec.y * normal.x + hemisphere_vec.z * n_t.x,
         y: hemisphere_vec.x * n_b.y + hemisphere_vec.y * normal.y + hemisphere_vec.z * n_t.y,
         z: hemisphere_vec.x * n_b.z + hemisphere_vec.y * normal.z + hemisphere_vec.z * n_t.z,
-    }
+    };
+    let weight = 1.0 / scatter.dot(*normal);
+    (scatter, weight)
 }
 
 fn create_coordinate_system(normal: &Vector3) -> (Vector3, Vector3) {
@@ -387,12 +419,14 @@ unsafe fn grid_march(
         let mut index_i = (*object.grid.index_ranges.offset(i as isize)).start;
         let index_stop = (*object.grid.index_ranges.offset(i as isize)).stop;
 
+        let mut t_min = min(t_max_x, min(t_max_y, t_max_z));
+
         while index_i < index_stop {
             let polygon_i = *object.grid.polygon_indexes.offset(index_i);
             let polygon = &*polygons.offset(polygon_i);
             stats.triangle_intersections += 1;
             if let Some((distance, normal)) = intersection_test(polygon, ray) {
-                if distance < closest_t {
+                if distance < closest_t && distance < t_min {
                     closest_t = distance;
                     closest_normal = normal;
                 }
@@ -400,25 +434,20 @@ unsafe fn grid_march(
             index_i += 1;
         }
 
-        let mut t_min = 0.0;
         if t_max_x < t_max_y {
             if t_max_x < t_max_z {
                 cur_x += step_x;
-                t_min = t_max_x;
                 t_max_x += t_delta_x;
             } else {
                 cur_z += step_z;
-                t_min = t_max_z;
                 t_max_z += t_delta_z;
             }
         } else {
             if t_max_y < t_max_z {
                 cur_y += step_y;
-                t_min = t_max_y;
                 t_max_y += t_delta_y;
             } else {
                 cur_z += step_z;
-                t_min = t_max_z;
                 t_max_z += t_delta_z;
             }
         }
