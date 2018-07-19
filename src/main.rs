@@ -390,9 +390,11 @@ fn main() {
     let mut all_objects = vec![];
     let mut all_grids = vec![];
 
-    let mesh_path = Path::new("resources/dragon.obj");
+    let mesh_path = Path::new("resources/utah-teapot.obj");
     let mesh: Obj<obj::SimplePolygon> = Obj::load(mesh_path).expect("Failed to load mesh");
-    let object_to_world_matrix = Matrix44::translate(0.0, -3.0, -5.0) * Matrix44::scale_linear(0.5);
+    let object_to_world_matrix = Matrix44::translate(0.0, -3.0 - -1.575, -5.0)
+        * Matrix44::scale_linear(1.0)
+        * Matrix44::translate(0.0, -(3.15 / 2.0), 0.0);
     let teapot_1_material = Material::Refractive { index: 1.5 };
     all_objects.push(make_object(
         &mut all_polygons,
@@ -402,8 +404,9 @@ fn main() {
         object_to_world_matrix,
     ));
 
-    let object_to_world_matrix =
-        Matrix44::translate(-4.0, -3.0, -6.0) * Matrix44::scale_linear(0.3);
+    let object_to_world_matrix = Matrix44::translate(-4.0, -3.0 - -1.575, -6.0)
+        * Matrix44::scale_linear(0.6)
+        * Matrix44::translate(0.0, -(3.15 / 2.0), 0.0);
     let teapot_2_material = Material::Reflective;
     all_objects.push(make_object(
         &mut all_polygons,
@@ -413,7 +416,9 @@ fn main() {
         object_to_world_matrix,
     ));
 
-    let object_to_world_matrix = Matrix44::translate(4.0, -3.0, -6.0) * Matrix44::scale_linear(0.3);
+    let object_to_world_matrix = Matrix44::translate(4.0, -3.0 - -1.575, -6.0)
+        * Matrix44::scale_linear(0.6)
+        * Matrix44::translate(0.0, -(3.15 / 2.0), 0.0);
     let teapot_3_material = Material::Diffuse {
         color: Color {
             red: 0.0,
@@ -435,7 +440,7 @@ fn main() {
     let object_to_world_matrix = Matrix44::translate(0.0, 7.0, -5.0) * Matrix44::scale_linear(0.25)
         * Matrix44::translate(0.0, -(3.15 / 2.0), 0.0);
     let light_material = Material::Emissive {
-        emission: WHITE.mul_s(2.0),
+        emission: WHITE.mul_s(1.5),
     };
     all_objects.push(make_object(
         &mut all_polygons,
@@ -466,8 +471,8 @@ fn main() {
     let load_time = load_start.elapsed();
     println!("Load/Convert Time: {:0.6}ms", to_millis(load_time));
 
-    let width = 1024u32 * 2;
-    let height = 736u32 * 2;
+    let width = 1024u32 / 4;
+    let height = 736u32 / 4;
     let fov = 90.0f32;
     let fov_adjustment = (fov.to_radians() / 2.0).tan();
     println!("{} polygons in scene", all_polygons.len());

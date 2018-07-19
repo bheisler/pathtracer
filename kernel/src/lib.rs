@@ -10,13 +10,12 @@ use core::mem::swap;
 
 const BOUNCE_CAP: u32 = 8;
 const FLOATING_POINT_BACKOFF: f32 = 0.01;
-const LIGHT_POWER_FUDGE_FACTOR: f32 = 1.25;
 
 // For each block of the image, we trace RAY_COUNT rays, and we trace over each block ROUND_COUNT times.
 // This makes it possible to take many more samples than we can fit into the 3-second window.
 // This has to be tuned based on the complexity of the scene.
-pub const ROUND_COUNT: u32 = 64;
-const RAY_COUNT: u32 = 32;
+pub const ROUND_COUNT: u32 = 1;
+const RAY_COUNT: u32 = 128;
 
 const RANDOM_SEED: u32 = 0x8802dfb5;
 
@@ -148,9 +147,7 @@ unsafe fn get_radiance(
                             .mul_s(reflected_power)
                             .mul_s(weight);
 
-                        color_mask = color_mask
-                            .mul(reflected_color)
-                            .mul_s(LIGHT_POWER_FUDGE_FACTOR);
+                        color_mask = color_mask.mul(reflected_color);
                     }
                     Material::Emissive { emission } => {
                         let (direction, _) = create_scatter_direction(&hit_normal, random_seed);
@@ -177,13 +174,13 @@ unsafe fn get_radiance(
                                         .add(hit_normal.mul_s(-FLOATING_POINT_BACKOFF)),
                                 };
                                 *scratch_space.masks.get_unchecked_mut(new_ray) =
-                                    color_mask.mul_s((1.0 - kr) * LIGHT_POWER_FUDGE_FACTOR);
+                                    color_mask.mul_s(1.0 - kr);
                             }
                         }
 
                         // The current ray becomes the reflection ray
                         current_ray.direction = make_reflection(current_ray.direction, hit_normal);
-                        color_mask = color_mask.mul_s(kr * LIGHT_POWER_FUDGE_FACTOR);
+                        color_mask = color_mask.mul_s(kr);
                     }
                 }
             } else {
@@ -350,11 +347,7 @@ unsafe fn intersect_scene(
         let object = &*objects.offset(object_i as isize);
         stats.bounding_box_intersections += 1;
         if let Some(t) = test_bounding_box(&object.bounding_box, ray) {
-            let hit_point = ray.origin
-                .add(ray.direction.mul_s(t + FLOATING_POINT_BACKOFF));
-
-            if let Some((distance, normal)) = grid_march(&object, polygons, &hit_point, &ray, stats)
-            {
+            if let Some((distance, normal)) = grid_march(&object, polygons, t, &ray, stats) {
                 if distance < closest_distance {
                     closest_distance = distance;
                     closest_normal = normal;
@@ -376,10 +369,12 @@ unsafe fn intersect_scene(
 unsafe fn grid_march(
     object: &Object,
     polygons: *const Polygon,
-    start: &Vector3,
+    dist_to_box: f32,
     ray: &Ray,
     stats: &mut Stats,
 ) -> Option<(f32, Vector3)> {
+    let start = ray.origin
+        .add(ray.direction.mul_s(dist_to_box + FLOATING_POINT_BACKOFF));
     let start2 = Vector3 {
         x: start.x - object.bounding_box.min_x,
         y: start.y - object.bounding_box.min_y,
@@ -426,7 +421,10 @@ unsafe fn grid_march(
             let polygon = &*polygons.offset(polygon_i);
             stats.triangle_intersections += 1;
             if let Some((distance, normal)) = intersection_test(polygon, ray) {
-                if distance < closest_t && distance < t_min {
+                // Not sure this is correct, but it seems to work...
+                if distance < closest_t
+                    && distance < (t_min + dist_to_box + FLOATING_POINT_BACKOFF * 2.0)
+                {
                     closest_t = distance;
                     closest_normal = normal;
                 }
