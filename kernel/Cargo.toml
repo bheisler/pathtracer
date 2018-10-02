@@ -5,3 +5,4 @@ authors = ["Brook Heisler <redattack34@gmail.com>"]
 
 [dependencies]
 common = { path = "../common" }
+nvptx-builtins = "0.1"

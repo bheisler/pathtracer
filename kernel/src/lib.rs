@@ -1,6 +1,8 @@
 #![no_std]
+#![feature(abi_ptx)]
 
 extern crate common;
+extern crate nvptx_builtins;
 
 use common::math::*;
 use common::{
@@ -14,8 +16,8 @@ const FLOATING_POINT_BACKOFF: f32 = 0.01;
 // For each block of the image, we trace RAY_COUNT rays, and we trace over each block ROUND_COUNT times.
 // This makes it possible to take many more samples than we can fit into the 3-second window.
 // This has to be tuned based on the complexity of the scene.
-pub const ROUND_COUNT: u32 = 1;
-const RAY_COUNT: u32 = 128;
+pub const ROUND_COUNT: u32 = 64;
+const RAY_COUNT: u32 = 32;
 
 const RANDOM_SEED: u32 = 0x8802dfb5;
 
@@ -23,6 +25,47 @@ struct Stats {
     rays_traced: u64,
     triangle_intersections: u64,
     bounding_box_intersections: u64,
+}
+
+#[cfg(target_os = "cuda")]
+#[no_mangle]
+pub unsafe extern "ptx-kernel" fn trace(
+    base_x: u32,
+    base_y: u32,
+    width: u32,
+    height: u32,
+    round: u32,
+    fov_adjustment: f32,
+    image: *mut common::Color,
+    polygons: *const common::Polygon,
+    objects: *const common::Object,
+    object_count: usize,
+    scratch_space: *mut common::ScratchSpace,
+) {
+    use nvptx_builtins::*;
+    let thread_x = block_idx_x() * block_dim_x() + thread_idx_x();
+    let thread_y = block_idx_y() * block_dim_y() + thread_idx_y();
+
+    let x = base_x + thread_x as u32;
+    let y = base_y + thread_y as u32;
+
+    let scratch_i = (thread_y * (grid_dim_x() * block_dim_x()) + thread_x) as isize;
+
+    let scratch = &mut (*scratch_space.offset(scratch_i));
+
+    trace_inner(
+        x,
+        y,
+        width,
+        height,
+        round,
+        fov_adjustment,
+        image,
+        polygons,
+        objects,
+        object_count,
+        scratch,
+    );
 }
 
 #[no_mangle]
@@ -421,7 +464,6 @@ unsafe fn grid_march(
             let polygon = &*polygons.offset(polygon_i);
             stats.triangle_intersections += 1;
             if let Some((distance, normal)) = intersection_test(polygon, ray) {
-                // Not sure this is correct, but it seems to work...
                 if distance < closest_t
                     && distance < (t_min + dist_to_box + FLOATING_POINT_BACKOFF * 2.0)
                 {

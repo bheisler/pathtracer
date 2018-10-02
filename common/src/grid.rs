@@ -1,6 +1,16 @@
+#[derive(Debug, Clone)]
 pub struct IndexRange {
     pub start: isize,
     pub stop: isize,
+}
+
+impl Default for IndexRange {
+    fn default() -> IndexRange {
+        IndexRange {
+            start: 0,
+            stop: 0,
+        }
+    }
 }
 
 pub struct GridDevice {

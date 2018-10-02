@@ -41,6 +41,7 @@ pub fn sqrt(x: f32) -> f32 {
 #[inline]
 pub fn sin(x: f32) -> f32 {
     x - powi(x, 3) / C6 + powi(x, 5) / C120 - powi(x, 7) / C5040 + powi(x, 9) / C362880
+    //unsafe { intrinsics::sinf32(x) }
 }
 
 #[inline]

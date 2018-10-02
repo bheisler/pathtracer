@@ -1,5 +1,5 @@
-use accel::UVec;
 use common::{BoundingBox, GridDevice, IndexRange, Polygon};
+use cuda_utils::DeviceBuffer;
 
 const LAMBDA: f32 = 4.0;
 
@@ -12,10 +12,10 @@ pub struct Grid {
     n_y: u32,
     n_z: u32,
     // Indexes into the shared polygon array
-    polygon_indexes: UVec<isize>,
+    polygon_indexes: DeviceBuffer<isize>,
 
     // An index range for each grid cell.
-    index_ranges: UVec<IndexRange>,
+    index_ranges: DeviceBuffer<IndexRange>,
 }
 
 fn clamp(min: u32, value: u32, max: u32) -> u32 {
@@ -84,8 +84,8 @@ impl Grid {
 
         let mut index_i = 0;
 
-        let mut polygon_indexes: UVec<isize> = UVec::new(num_indexes).unwrap();
-        let mut index_ranges: UVec<IndexRange> = UVec::new(num_cells as usize).unwrap();
+        let mut polygon_indexes_host: Vec<isize> = vec![0; num_indexes];
+        let mut index_ranges_host: Vec<IndexRange> = vec![Default::default(); num_cells as usize];
 
         for z in 0..n_z {
             for y in 0..n_y {
@@ -95,17 +95,22 @@ impl Grid {
                     
                     let start = index_i;
                     for index in indexes_for_current_cell {
-                        polygon_indexes[index_i] = (*index) as isize;
+                        polygon_indexes_host[index_i] = (*index) as isize;
                         index_i += 1;
                     }
                     let end = index_i;
-                    index_ranges[i as usize] = IndexRange {
+                    index_ranges_host[i as usize] = IndexRange {
                         start: start as isize, 
                         stop: end as isize,
                     }
                 }
             }
         }
+
+        let mut polygon_indexes_device = DeviceBuffer::new(num_indexes).unwrap();
+        polygon_indexes_device.copy_to_device(&polygon_indexes_host).unwrap();
+        let mut index_ranges_device = DeviceBuffer::new(num_cells as usize).unwrap();
+        index_ranges_device.copy_to_device(&index_ranges_host).unwrap();
 
         let grid = Grid {
             cell_x,
@@ -114,13 +119,15 @@ impl Grid {
             n_x,
             n_y,
             n_z,
-            polygon_indexes,
-            index_ranges
+            polygon_indexes: polygon_indexes_device,
+            index_ranges: index_ranges_device
         };
         grid
     }
 
     pub fn to_device(&self) -> GridDevice {
+
+
         GridDevice {
             cell_x: self.cell_x,
             cell_y: self.cell_y,

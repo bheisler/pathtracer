@@ -1,15 +1,14 @@
-#![feature(proc_macro)]
 #![allow(dead_code)]
 
-extern crate accel;
-extern crate accel_derive;
 extern crate common;
 extern crate image;
 extern crate kernel;
 extern crate obj;
+extern crate cuda;
 
-use accel::*;
-use accel_derive::kernel;
+#[macro_use]
+extern crate lazy_static;
+
 use common::{
     BoundingBox, Color, Material, Object, Polygon, Ray, ScratchSpace, Vector3, BLACK, WHITE,
 };
@@ -18,18 +17,19 @@ use kernel::ROUND_COUNT;
 use obj::Obj;
 use std::path::Path;
 use std::time::{Duration, Instant};
+use cuda::driver;
+use cuda::driver::{Any, Block, Direction, Error as CudaError, Grid};
 
 mod grid;
 mod matrix;
+mod cuda_utils;
 
+use cuda_utils::DeviceBuffer;
 use matrix::Matrix44;
 
-#[kernel]
-#[crate("accel-core" = "0.2.0-alpha")]
-#[crate_path("kernel" = "../kernel")]
-#[crate_path("common" = "../common")]
-#[build_path(".kernel")]
-pub unsafe fn trace(
+pub fn trace(
+    grid_size: Grid,
+    block_size: Block,
     base_x: u32,
     base_y: u32,
     width: u32,
@@ -41,32 +41,29 @@ pub unsafe fn trace(
     objects: *const common::Object,
     object_count: usize,
     scratch_space: *mut common::ScratchSpace,
-) {
-    use accel_core::*;
+) -> Result<(), CudaError> {
 
-    let thread_x = nvptx_block_idx_x() * nvptx_block_dim_x() + nvptx_thread_idx_x();
-    let thread_y = nvptx_block_idx_y() * nvptx_block_dim_y() + nvptx_thread_idx_y();
+    let kernel = cuda_utils::MODULE.kernel("trace")?;
 
-    let x = base_x + thread_x as u32;
-    let y = base_y + thread_y as u32;
+    kernel.launch(
+        &[
+            Any(&base_x),
+            Any(&base_y),
+            Any(&width),
+            Any(&height),
+            Any(&round),
+            Any(&fov_adjustment),
+            Any(&image),
+            Any(&polygons),
+            Any(&objects),
+            Any(&object_count),
+            Any(&scratch_space),
+        ],
+        grid_size,
+        block_size,
+    )?;
 
-    let scratch_i = (thread_y * (nvptx_grid_dim_x() * nvptx_block_dim_x()) + thread_x) as isize;
-
-    let scratch = &mut (*scratch_space.offset(scratch_i));
-
-    kernel::trace_inner(
-        x,
-        y,
-        width,
-        height,
-        round,
-        fov_adjustment,
-        image,
-        polygons,
-        objects,
-        object_count,
-        scratch,
-    );
+    Ok(())   
 }
 
 fn make_object(
@@ -193,20 +190,20 @@ fn trace_gpu(
     height: u32,
     width: u32,
     fov_adjustment: f32,
-    polygons: UVec<Polygon>,
-    objects: UVec<Object>,
+    polygons: DeviceBuffer<Polygon>,
+    objects: DeviceBuffer<Object>,
 ) {
     use color_ext::ColorExt;
-    let mut image_device: UVec<Color> = UVec::new((width * height) as usize).unwrap();
+    let mut image_device: DeviceBuffer<Color> = DeviceBuffer::new((width * height) as usize).unwrap();
 
     let chunk_size_x = 128;
     let chunk_size_y = 64;
     let thread_count = (chunk_size_x * chunk_size_y) as usize;
 
-    let mut scratch_space: UVec<ScratchSpace> = UVec::new(thread_count).unwrap();
+    let mut scratch_space: DeviceBuffer<ScratchSpace> = DeviceBuffer::new(thread_count).unwrap();
 
-    let block = Block::xy(32, 16);
-    let grid = Grid::xy(chunk_size_x / block.x, chunk_size_y / block.y);
+    let block_y = 16;
+    let block_x = 32;
 
     let trace_start = Instant::now();
 
@@ -222,7 +219,11 @@ fn trace_gpu(
 
             for round in 0..ROUND_COUNT {
                 let round_start = Instant::now();
-                trace(
+
+                let block = Block::xy(block_x, block_y);
+                let grid = Grid::xy(chunk_size_x / block_x, chunk_size_y / block_y);
+
+                let err = trace(
                     grid,
                     block,
                     base_x,
@@ -237,7 +238,6 @@ fn trace_gpu(
                     objects.len(),
                     scratch_space.as_mut_ptr(),
                 );
-                let err = device::sync();
                 match err {
                     Err(e) => println!("{:?}", e),
                     Ok(_) => {}
@@ -264,16 +264,20 @@ fn trace_gpu(
 
     let trace_time = trace_start.elapsed();
 
-    println!("{} polygons in scene", polygons.as_slice().len());
+    println!("{} polygons in scene", polygons.len());
     println!("Trace time: {:0.6}ms", to_millis(trace_time));
+
+    let mut scratch_space_host : Vec<ScratchSpace> = Vec::with_capacity(thread_count);
+    unsafe { scratch_space_host.set_len(thread_count); }
+    scratch_space.copy_to_host(&mut scratch_space_host).unwrap();
 
     let mut rays_traced = 0u64;
     let mut triangle_intersections = 0u64;
     let mut bounding_box_intersections = 0u64;
     for i in 0..thread_count {
-        rays_traced += scratch_space[i].rays_traced;
-        triangle_intersections += scratch_space[i].triangle_intersections;
-        bounding_box_intersections += scratch_space[i].bounding_box_intersections;
+        rays_traced += scratch_space_host[i].rays_traced;
+        triangle_intersections += scratch_space_host[i].triangle_intersections;
+        bounding_box_intersections += scratch_space_host[i].bounding_box_intersections;
     }
     println!("Traced {} rays", rays_traced);
     println!(
@@ -285,30 +289,34 @@ fn trace_gpu(
         triangle_intersections
     );
 
+    let mut image_host : Vec<Color> = Vec::with_capacity((width * height) as usize);
+    unsafe { image_host.set_len((width * height) as usize); }
     let transfer_start = Instant::now();
-    let mut image_host = ImageBuffer::new(width, height);
-    for y in 0..height {
-        let line_start = y * width;
-        for x in 0..width {
-            let color = &image_device[(line_start + x) as usize];
-            image_host.put_pixel(x, y, color.clamp().to_rgba());
-        }
-    }
+    image_device.copy_to_host(&mut image_host).unwrap();
     let transfer_time = transfer_start.elapsed();
     println!("Transfer time: {:0.6}ms", to_millis(transfer_time));
 
-    image_host.save("image_out.png").unwrap();
+    let mut image_buffer = ImageBuffer::new(width, height);
+    for y in 0..height {
+        let line_start = y * width;
+        for x in 0..width {
+            let color = &image_host[(line_start + x) as usize];
+            image_buffer.put_pixel(x, y, color.clamp().to_rgba());
+        }
+    }
+
+    image_buffer.save("image_out.png").unwrap();
 }
 
 fn trace_cpu(
     height: u32,
     width: u32,
     fov_adjustment: f32,
-    polygons: UVec<Polygon>,
-    objects: UVec<Object>,
+    polygons: Vec<Polygon>,
+    objects: Vec<Object>,
 ) {
     use color_ext::ColorExt;
-    let mut image_device: UVec<Color> = UVec::new((width * height) as usize).unwrap();
+    let mut image_device: Vec<Color> = vec![BLACK; (width * height) as usize];
 
     let zero_ray = Ray {
         direction: Vector3::zero(),
@@ -384,17 +392,18 @@ fn trace_cpu(
 }
 
 fn main() {
+    // Initialize the CUDA API by forcing the lazy_static to evaluate.
+    let _ = &*cuda_utils::STATIC_CONTEXT;
+
     let load_start = Instant::now();
 
     let mut all_polygons = vec![];
     let mut all_objects = vec![];
     let mut all_grids = vec![];
 
-    let mesh_path = Path::new("resources/utah-teapot.obj");
+    let mesh_path = Path::new("resources/dragon.obj");
     let mesh: Obj<obj::SimplePolygon> = Obj::load(mesh_path).expect("Failed to load mesh");
-    let object_to_world_matrix = Matrix44::translate(0.0, -3.0 - -1.575, -5.0)
-        * Matrix44::scale_linear(1.0)
-        * Matrix44::translate(0.0, -(3.15 / 2.0), 0.0);
+    let object_to_world_matrix = Matrix44::translate(0.0, -3.0, -5.0) * Matrix44::scale_linear(0.5);
     let teapot_1_material = Material::Refractive { index: 1.5 };
     all_objects.push(make_object(
         &mut all_polygons,
@@ -404,9 +413,8 @@ fn main() {
         object_to_world_matrix,
     ));
 
-    let object_to_world_matrix = Matrix44::translate(-4.0, -3.0 - -1.575, -6.0)
-        * Matrix44::scale_linear(0.6)
-        * Matrix44::translate(0.0, -(3.15 / 2.0), 0.0);
+    let object_to_world_matrix =
+        Matrix44::translate(-4.0, -3.0, -6.0) * Matrix44::scale_linear(0.3);
     let teapot_2_material = Material::Reflective;
     all_objects.push(make_object(
         &mut all_polygons,
@@ -416,9 +424,7 @@ fn main() {
         object_to_world_matrix,
     ));
 
-    let object_to_world_matrix = Matrix44::translate(4.0, -3.0 - -1.575, -6.0)
-        * Matrix44::scale_linear(0.6)
-        * Matrix44::translate(0.0, -(3.15 / 2.0), 0.0);
+    let object_to_world_matrix = Matrix44::translate(4.0, -3.0, -6.0) * Matrix44::scale_linear(0.3);
     let teapot_3_material = Material::Diffuse {
         color: Color {
             red: 0.0,
@@ -440,7 +446,7 @@ fn main() {
     let object_to_world_matrix = Matrix44::translate(0.0, 7.0, -5.0) * Matrix44::scale_linear(0.25)
         * Matrix44::translate(0.0, -(3.15 / 2.0), 0.0);
     let light_material = Material::Emissive {
-        emission: WHITE.mul_s(1.5),
+        emission: WHITE.mul_s(2.0),
     };
     all_objects.push(make_object(
         &mut all_polygons,
@@ -477,15 +483,11 @@ fn main() {
     let fov_adjustment = (fov.to_radians() / 2.0).tan();
     println!("{} polygons in scene", all_polygons.len());
 
-    let mut polygons_device: UVec<Polygon> = UVec::new(all_polygons.len()).unwrap();
-    for (i, poly) in all_polygons.into_iter().enumerate() {
-        polygons_device[i] = poly;
-    }
+    let mut polygons_device: DeviceBuffer<Polygon> = DeviceBuffer::new(all_polygons.len()).unwrap();
+    polygons_device.copy_to_device(&all_polygons).unwrap();
 
-    let mut objects_device: UVec<Object> = UVec::new(all_objects.len()).unwrap();
-    for (i, obj) in all_objects.into_iter().enumerate() {
-        objects_device[i] = obj;
-    }
+    let mut objects_device: DeviceBuffer<Object> = DeviceBuffer::new(all_objects.len()).unwrap();
+    objects_device.copy_to_device(&all_objects).unwrap();
 
     trace_gpu(
         height,
