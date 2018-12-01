@@ -7,10 +7,10 @@ build = "build.rs"
 [dependencies]
 kernel = { path = "kernel" }
 common = { path = "common" }
-image = "0.19.0"
-obj = "0.8.2"
-cuda = { git = "https://github.com/japaric/cuda" }
-lazy_static = "1.1"
+image = "0.20"
+obj = "0.9"
+rustacuda = { path = "../rustacuda" }
+lazy_static = "1.2"
 
 [build-dependencies]
-ptx-builder = "0.4"
+ptx-builder = "0.5"

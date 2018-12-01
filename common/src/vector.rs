@@ -1,6 +1,6 @@
 use math;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, DeviceCopy)]
 pub struct Vector3 {
     pub x: f32,
     pub y: f32,
@@ -105,7 +105,7 @@ impl Vector3 {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, DeviceCopy)]
 pub struct Ray {
     pub origin: Vector3,
     pub direction: Vector3,

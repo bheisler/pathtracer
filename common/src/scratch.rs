@@ -3,6 +3,7 @@ use vector::Ray;
 
 const NUM_RAYS: usize = 16;
 
+#[derive(DeviceCopy)]
 pub struct ScratchSpace {
     pub rays: [Ray; NUM_RAYS],
     pub masks: [Color; NUM_RAYS],

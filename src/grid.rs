@@ -1,5 +1,5 @@
 use common::{BoundingBox, GridDevice, IndexRange, Polygon};
-use cuda_utils::DeviceBuffer;
+use rustacuda::memory::DeviceBuffer;
 
 const LAMBDA: f32 = 4.0;
 
@@ -107,10 +107,8 @@ impl Grid {
             }
         }
 
-        let mut polygon_indexes_device = DeviceBuffer::new(num_indexes).unwrap();
-        polygon_indexes_device.copy_to_device(&polygon_indexes_host).unwrap();
-        let mut index_ranges_device = DeviceBuffer::new(num_cells as usize).unwrap();
-        index_ranges_device.copy_to_device(&index_ranges_host).unwrap();
+        let polygon_indexes_device = DeviceBuffer::from_slice(&polygon_indexes_host).unwrap();
+        let index_ranges_device = DeviceBuffer::from_slice(&index_ranges_host).unwrap();
 
         let grid = Grid {
             cell_x,
@@ -120,14 +118,12 @@ impl Grid {
             n_y,
             n_z,
             polygon_indexes: polygon_indexes_device,
-            index_ranges: index_ranges_device
+            index_ranges: index_ranges_device,
         };
         grid
     }
 
-    pub fn to_device(&self) -> GridDevice {
-
-
+    pub fn to_device(&mut self) -> GridDevice {
         GridDevice {
             cell_x: self.cell_x,
             cell_y: self.cell_y,
@@ -137,9 +133,9 @@ impl Grid {
             n_y: self.n_y as i32,
             n_z: self.n_z as i32,
 
-            polygon_indexes: self.polygon_indexes.as_ptr(),
+            polygon_indexes: self.polygon_indexes.as_device_ptr(),
 
-            index_ranges: self.index_ranges.as_ptr(),
+            index_ranges: self.index_ranges.as_device_ptr(),
         }
     }
 }

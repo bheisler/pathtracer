@@ -4,7 +4,9 @@ extern crate common;
 extern crate image;
 extern crate kernel;
 extern crate obj;
-extern crate cuda;
+
+#[macro_use]
+extern crate rustacuda;
 
 #[macro_use]
 extern crate lazy_static;
@@ -17,54 +19,53 @@ use kernel::ROUND_COUNT;
 use obj::Obj;
 use std::path::Path;
 use std::time::{Duration, Instant};
-use cuda::driver;
-use cuda::driver::{Any, Block, Direction, Error as CudaError, Grid};
+use rustacuda::prelude::*;
+use rustacuda::error::CudaError;
+use rustacuda::function::{BlockSize, GridSize};
 
 mod grid;
 mod matrix;
-mod cuda_utils;
-
-use cuda_utils::DeviceBuffer;
 use matrix::Matrix44;
 
-pub fn trace(
-    grid_size: Grid,
-    block_size: Block,
-    base_x: u32,
-    base_y: u32,
-    width: u32,
-    height: u32,
-    round: u32,
-    fov_adjustment: f32,
-    image: *mut common::Color,
-    polygons: *const common::Polygon,
-    objects: *const common::Object,
-    object_count: usize,
-    scratch_space: *mut common::ScratchSpace,
-) -> Result<(), CudaError> {
-
-    let kernel = cuda_utils::MODULE.kernel("trace")?;
-
-    kernel.launch(
-        &[
-            Any(&base_x),
-            Any(&base_y),
-            Any(&width),
-            Any(&height),
-            Any(&round),
-            Any(&fov_adjustment),
-            Any(&image),
-            Any(&polygons),
-            Any(&objects),
-            Any(&object_count),
-            Any(&scratch_space),
-        ],
-        grid_size,
-        block_size,
-    )?;
-
-    Ok(())   
+struct GpuPathTracer {
+    module: Module,
+    stream: Stream,
 }
+
+impl GpuPathTracer {
+    fn trace(
+        &self,
+        grid_size: &GridSize,
+        block_size: &BlockSize,
+        base_x: u32,
+        base_y: u32,
+        width: u32,
+        height: u32,
+        round: u32,
+        fov_adjustment: f32,
+        image: &mut DeviceBuffer<common::Color>,
+        polygons: &mut DeviceBuffer<common::Polygon>,
+        objects: &mut DeviceBuffer<common::Object>,
+        scratch_space: &mut DeviceBuffer<common::ScratchSpace>,
+    ) -> Result<(), CudaError> {
+
+        let module = &self.module;
+        let stream = &self.stream;
+
+        unsafe {
+            launch!(module.trace<<<grid_size, block_size, 0, stream>>>(
+                base_x, base_y, width, height, round, fov_adjustment, 
+                image.as_device_ptr(), polygons.as_device_ptr(), objects.as_device_ptr(),
+                objects.len(), scratch_space.as_device_ptr()
+            ))?;
+        }
+
+        stream.synchronize()?;
+
+        Ok(())   
+    }
+}
+
 
 fn make_object(
     all_polygons: &mut Vec<Polygon>,
@@ -118,7 +119,7 @@ fn make_object(
 
     let bounding_box = make_bounding_box(polygon_slice);
 
-    let grid = grid::Grid::new(&bounding_box, polygon_slice, polygon_start);
+    let mut grid = grid::Grid::new(&bounding_box, polygon_slice, polygon_start);
     let grid_device = grid.to_device();
     all_grids.push(grid);
 
@@ -130,6 +131,7 @@ fn make_object(
         grid: grid_device,
     }
 }
+
 
 // This has to go here because the powf function doesn't exist in no_std and the intrisic breaks
 // the linker. *sigh*
@@ -190,17 +192,27 @@ fn trace_gpu(
     height: u32,
     width: u32,
     fov_adjustment: f32,
-    polygons: DeviceBuffer<Polygon>,
-    objects: DeviceBuffer<Object>,
+    mut polygons: DeviceBuffer<Polygon>,
+    mut objects: DeviceBuffer<Object>,
 ) {
-    use color_ext::ColorExt;
-    let mut image_device: DeviceBuffer<Color> = DeviceBuffer::new((width * height) as usize).unwrap();
+    // TODO: Is it necessary for DeviceBuffer::as_device_ptr to take self by &mut?
+    use std::ffi::CString;
+    println!(env!("KERNEL_PTX_PATH"));
+    let ptx_file = CString::new(include_str!(env!("KERNEL_PTX_PATH"))).unwrap();
+    let tracer = GpuPathTracer {
+        module: Module::load_from_string(&ptx_file).unwrap(),
+        stream: Stream::new(StreamFlags::NON_BLOCKING, None).unwrap(),
+    };
 
-    let chunk_size_x = 128;
+    use color_ext::ColorExt;
+    // TODO: RustaCUDA needs a way to create zero-filled device buffers.
+    let mut image_device: DeviceBuffer<Color> = unsafe { DeviceBuffer::uninitialized((width * height) as usize).unwrap() };
+
+    let chunk_size_x = 32;
     let chunk_size_y = 64;
     let thread_count = (chunk_size_x * chunk_size_y) as usize;
 
-    let mut scratch_space: DeviceBuffer<ScratchSpace> = DeviceBuffer::new(thread_count).unwrap();
+    let mut scratch_space: DeviceBuffer<ScratchSpace> = unsafe { DeviceBuffer::uninitialized(thread_count).unwrap() };
 
     let block_y = 16;
     let block_x = 32;
@@ -211,6 +223,10 @@ fn trace_gpu(
     let num_chunks_x = (width / chunk_size_x) + 1;
     let num_chunks = num_chunks_x * num_chunks_y;
 
+    // TODO: RustaCUDA shouldn't allow zeroes or other invalid values here. Or should it? It's not violating memory safety.
+    let block = BlockSize::xy(block_x, block_y);
+    let grid = GridSize::xy(chunk_size_x / block_x, chunk_size_y / block_y);
+
     for chunk_y in 0..num_chunks_y {
         let base_y = chunk_y * chunk_size_y;
         for chunk_x in 0..num_chunks_x {
@@ -220,23 +236,19 @@ fn trace_gpu(
             for round in 0..ROUND_COUNT {
                 let round_start = Instant::now();
 
-                let block = Block::xy(block_x, block_y);
-                let grid = Grid::xy(chunk_size_x / block_x, chunk_size_y / block_y);
-
-                let err = trace(
-                    grid,
-                    block,
+                let err = tracer.trace(
+                    &grid,
+                    &block,
                     base_x,
                     base_y,
                     width,
                     height,
                     round,
                     fov_adjustment,
-                    image_device.as_mut_ptr(),
-                    polygons.as_ptr(),
-                    objects.as_ptr(),
-                    objects.len(),
-                    scratch_space.as_mut_ptr(),
+                    &mut image_device,
+                    &mut polygons,
+                    &mut objects,
+                    &mut scratch_space,
                 );
                 match err {
                     Err(e) => println!("{:?}", e),
@@ -269,7 +281,7 @@ fn trace_gpu(
 
     let mut scratch_space_host : Vec<ScratchSpace> = Vec::with_capacity(thread_count);
     unsafe { scratch_space_host.set_len(thread_count); }
-    scratch_space.copy_to_host(&mut scratch_space_host).unwrap();
+    scratch_space.copy_to(&mut scratch_space_host).unwrap();
 
     let mut rays_traced = 0u64;
     let mut triangle_intersections = 0u64;
@@ -292,7 +304,7 @@ fn trace_gpu(
     let mut image_host : Vec<Color> = Vec::with_capacity((width * height) as usize);
     unsafe { image_host.set_len((width * height) as usize); }
     let transfer_start = Instant::now();
-    image_device.copy_to_host(&mut image_host).unwrap();
+    image_device.copy_to(&mut image_host).unwrap();
     let transfer_time = transfer_start.elapsed();
     println!("Transfer time: {:0.6}ms", to_millis(transfer_time));
 
@@ -392,8 +404,7 @@ fn trace_cpu(
 }
 
 fn main() {
-    // Initialize the CUDA API by forcing the lazy_static to evaluate.
-    let _ = &*cuda_utils::STATIC_CONTEXT;
+    let _ctx = rustacuda::quick_init().unwrap();
 
     let load_start = Instant::now();
 
@@ -483,11 +494,8 @@ fn main() {
     let fov_adjustment = (fov.to_radians() / 2.0).tan();
     println!("{} polygons in scene", all_polygons.len());
 
-    let mut polygons_device: DeviceBuffer<Polygon> = DeviceBuffer::new(all_polygons.len()).unwrap();
-    polygons_device.copy_to_device(&all_polygons).unwrap();
-
-    let mut objects_device: DeviceBuffer<Object> = DeviceBuffer::new(all_objects.len()).unwrap();
-    objects_device.copy_to_device(&all_objects).unwrap();
+    let polygons_device: DeviceBuffer<Polygon> = DeviceBuffer::from_slice(&all_polygons).unwrap();
+    let objects_device: DeviceBuffer<Object> = DeviceBuffer::from_slice(&all_objects).unwrap();
 
     trace_gpu(
         height,

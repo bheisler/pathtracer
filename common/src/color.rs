@@ -12,7 +12,7 @@ pub const WHITE: Color = Color {
     blue: 1.0,
 };
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, DeviceCopy)]
 pub struct Color {
     pub red: f32,
     pub green: f32,

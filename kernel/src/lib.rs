@@ -1,5 +1,7 @@
 #![no_std]
+
 #![feature(abi_ptx)]
+#![feature(core_intrinsics)]
 
 extern crate common;
 extern crate nvptx_builtins;
@@ -16,8 +18,8 @@ const FLOATING_POINT_BACKOFF: f32 = 0.01;
 // For each block of the image, we trace RAY_COUNT rays, and we trace over each block ROUND_COUNT times.
 // This makes it possible to take many more samples than we can fit into the 3-second window.
 // This has to be tuned based on the complexity of the scene.
-pub const ROUND_COUNT: u32 = 64;
-const RAY_COUNT: u32 = 32;
+pub const ROUND_COUNT: u32 = 128;
+const RAY_COUNT: u32 = 16;
 
 const RANDOM_SEED: u32 = 0x8802dfb5;
 
@@ -25,6 +27,13 @@ struct Stats {
     rays_traced: u64,
     triangle_intersections: u64,
     bounding_box_intersections: u64,
+}
+
+#[cfg(target_os = "cuda")]
+#[panic_handler]
+unsafe fn breakpoint_panic_handler(_: &::core::panic::PanicInfo) -> ! {
+    core::intrinsics::breakpoint();
+    core::hint::unreachable_unchecked();
 }
 
 #[cfg(target_os = "cuda")]
@@ -454,13 +463,13 @@ unsafe fn grid_march(
         && cur_z >= 0 && cur_z < object.grid.n_z
     {
         let i = (cur_z * object.grid.n_y * object.grid.n_x) + (cur_y * object.grid.n_x) + cur_x;
-        let mut index_i = (*object.grid.index_ranges.offset(i as isize)).start;
-        let index_stop = (*object.grid.index_ranges.offset(i as isize)).stop;
+        let mut index_i = (*object.grid.index_ranges.offset(i as isize).as_raw()).start;
+        let index_stop = (*object.grid.index_ranges.offset(i as isize).as_raw()).stop;
 
         let mut t_min = min(t_max_x, min(t_max_y, t_max_z));
 
         while index_i < index_stop {
-            let polygon_i = *object.grid.polygon_indexes.offset(index_i);
+            let polygon_i = *object.grid.polygon_indexes.offset(index_i).as_raw();
             let polygon = &*polygons.offset(polygon_i);
             stats.triangle_intersections += 1;
             if let Some((distance, normal)) = intersection_test(polygon, ray) {

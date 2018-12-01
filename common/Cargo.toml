@@ -4,3 +4,5 @@ version = "0.1.0"
 authors = ["Brook Heisler <redattack34@gmail.com>"]
 
 [dependencies]
+rustacuda_core = { path = "../../rustacuda/rustacuda_core" }
+rustacuda_derive = { path = "../../rustacuda/rustacuda_derive" }
