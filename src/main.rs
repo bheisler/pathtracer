@@ -195,7 +195,6 @@ fn trace_gpu(
     mut polygons: DeviceBuffer<Polygon>,
     mut objects: DeviceBuffer<Object>,
 ) {
-    // TODO: Is it necessary for DeviceBuffer::as_device_ptr to take self by &mut?
     use std::ffi::CString;
     println!(env!("KERNEL_PTX_PATH"));
     let ptx_file = CString::new(include_str!(env!("KERNEL_PTX_PATH"))).unwrap();
@@ -205,14 +204,13 @@ fn trace_gpu(
     };
 
     use color_ext::ColorExt;
-    // TODO: RustaCUDA needs a way to create zero-filled device buffers.
-    let mut image_device: DeviceBuffer<Color> = unsafe { DeviceBuffer::uninitialized((width * height) as usize).unwrap() };
+    let mut image_device: DeviceBuffer<Color> = unsafe { DeviceBuffer::zeroed((width * height) as usize).unwrap() };
 
     let chunk_size_x = 32;
     let chunk_size_y = 64;
     let thread_count = (chunk_size_x * chunk_size_y) as usize;
 
-    let mut scratch_space: DeviceBuffer<ScratchSpace> = unsafe { DeviceBuffer::uninitialized(thread_count).unwrap() };
+    let mut scratch_space: DeviceBuffer<ScratchSpace> = unsafe { DeviceBuffer::zeroed(thread_count).unwrap() };
 
     let block_y = 16;
     let block_x = 32;
@@ -223,7 +221,6 @@ fn trace_gpu(
     let num_chunks_x = (width / chunk_size_x) + 1;
     let num_chunks = num_chunks_x * num_chunks_y;
 
-    // TODO: RustaCUDA shouldn't allow zeroes or other invalid values here. Or should it? It's not violating memory safety.
     let block = BlockSize::xy(block_x, block_y);
     let grid = GridSize::xy(chunk_size_x / block_x, chunk_size_y / block_y);
 
